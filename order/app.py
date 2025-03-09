@@ -10,6 +10,7 @@ import requests
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+from confluent_kafka import Producer
 
 
 DB_ERROR_STR = "DB error"
@@ -23,6 +24,7 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
+producer = Producer({'bootstrap.servers': 'kafka:9092'})
 
 
 def close_db_connection():
@@ -90,19 +92,19 @@ def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
         return abort(400, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for orders successful"})
 
-
-@app.get('/find/<order_id>')
-def find_order(order_id: str):
-    order_entry: OrderValue = get_order_from_db(order_id)
-    return jsonify(
-        {
+def order_dto(order_id: str, order_entry: OrderValue):
+    return {
             "order_id": order_id,
             "paid": order_entry.paid,
             "items": order_entry.items,
             "user_id": order_entry.user_id,
             "total_cost": order_entry.total_cost
         }
-    )
+
+@app.get('/find/<order_id>')
+def find_order(order_id: str):
+    order_entry: OrderValue = get_order_from_db(order_id)
+    return jsonify(order_dto(order_id, order_entry))
 
 
 def send_post_request(url: str):
@@ -150,30 +152,32 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
-    # get the quantity per item
-    items_quantities: dict[str, int] = defaultdict(int)
-    for item_id, quantity in order_entry.items:
-        items_quantities[item_id] += quantity
-    # The removed items will contain the items that we already have successfully subtracted stock from
-    # for rollback purposes.
-    removed_items: list[tuple[str, int]] = []
-    for item_id, quantity in items_quantities.items():
-        stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
-        if stock_reply.status_code != 200:
-            # If one item does not have enough stock we need to rollback
-            rollback_stock(removed_items)
-            abort(400, f'Out of stock on item_id: {item_id}')
-        removed_items.append((item_id, quantity))
+    # # get the quantity per item
+    # items_quantities: dict[str, int] = defaultdict(int)
+    # for item_id, quantity in order_entry.items:
+    #     items_quantities[item_id] += quantity
+    # # The removed items will contain the items that we already have successfully subtracted stock from
+    # # for rollback purposes.
+    # removed_items: list[tuple[str, int]] = []
+    # for item_id, quantity in items_quantities.items():
+    #     stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
+    #     if stock_reply.status_code != 200:
+    #         # If one item does not have enough stock we need to rollback
+    #         rollback_stock(removed_items)
+    #         abort(400, f'Out of stock on item_id: {item_id}')
+    #     removed_items.append((item_id, quantity))
     user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
     if user_reply.status_code != 200:
-        # If the user does not have enough credit we need to rollback all the item stock subtractions
-        rollback_stock(removed_items)
+        # # If the user does not have enough credit we need to rollback all the item stock subtractions
+        # rollback_stock(removed_items)
         abort(400, "User out of credit")
     order_entry.paid = True
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
+    producer.produce('order', key=order_id, value=msgpack.encode(order_dto(order_id, order_entry)))
+    producer.flush()
     app.logger.debug("Checkout successful")
     return Response("Checkout successful", status=200)
 
