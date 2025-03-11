@@ -3,7 +3,8 @@ import os
 import atexit
 import random
 import uuid
-from collections import defaultdict
+import json
+import time
 
 import redis
 import requests
@@ -14,6 +15,20 @@ from flask import Flask, jsonify, abort, Response
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
+
+
+# Stream keys
+ORDER_EVENTS = "order:events"
+PAYMENT_EVENTS = "payment:events"
+STOCK_EVENTS = "stock:events"
+
+# Event types
+ORDER_CREATED = "order.created" # we post
+
+# Consumer Groups
+ORDER_STOCK_GROUP = "order-stock-consumer"
+ORDER_PAYMENT_GROUP = "order-payment-consumer"
+
 
 GATEWAY_URL = os.environ['GATEWAY_URL']
 
@@ -38,6 +53,36 @@ class OrderValue(Struct):
     user_id: str
     total_cost: int
 
+
+def publish_event(stream, event_type, data):
+    """Publish an event to a Redis Stream"""
+    event = {
+        "type": event_type,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+        "transaction_id": data.get("transaction_id", str(uuid.uuid4()))
+    }
+    try:
+        db.xadd(stream, {b'event': json.dumps(event).encode()})
+        app.logger.debug(f"Published event {event_type} to {stream}")
+        return event
+    except Exception as e:
+        app.logger.error(f"Failed to publish event: {e}")
+        return None
+
+
+def ensure_consumer_group(stream, group):
+    """Create a consumer group if it doesn't exist"""
+    try:
+        db.xgroup_create(stream, group, id='0-0', mkstream=True)
+        app.logger.info(f"Created consumer group {group} for stream {stream}")
+    except redis.exceptions.ResponseError as e:
+        if 'BUSYGROUP' in str(e):  # Group already exists
+            app.logger.debug(f"Consumer group {group} already exists for stream {stream}")
+            pass
+        else:
+            app.logger.error(f"Error creating consumer group: {e}")
+            raise
 
 def get_order_from_db(order_id: str) -> OrderValue | None:
     try:
@@ -142,42 +187,92 @@ def add_item(order_id: str, item_id: str, quantity: int):
 
 
 def rollback_stock(removed_items: list[tuple[str, int]]):
-    for item_id, quantity in removed_items:
-        send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
-
+    for item_id, amount in removed_items:
+        send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{amount}")
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
+
     order_entry: OrderValue = get_order_from_db(order_id)
-    # get the quantity per item
-    items_quantities: dict[str, int] = defaultdict(int)
-    for item_id, quantity in order_entry.items:
-        items_quantities[item_id] += quantity
-    # The removed items will contain the items that we already have successfully subtracted stock from
-    # for rollback purposes.
-    removed_items: list[tuple[str, int]] = []
-    for item_id, quantity in items_quantities.items():
-        stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
-        if stock_reply.status_code != 200:
-            # If one item does not have enough stock we need to rollback
-            rollback_stock(removed_items)
-            abort(400, f'Out of stock on item_id: {item_id}')
-        removed_items.append((item_id, quantity))
-    user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-    if user_reply.status_code != 200:
-        # If the user does not have enough credit we need to rollback all the item stock subtractions
-        rollback_stock(removed_items)
-        abort(400, "User out of credit")
-    order_entry.paid = True
+
+    # Check if order is already paid
+    if order_entry.paid:
+        return Response(f'Order {order_id} already paid", status=200')
+
+    formatted_items = []
+    for item_id, amount in order_entry.items:
+        formatted_items.append({
+            "item_id": item_id,
+            "amount": amount
+        })
+
+    # Generate a transaction ID for tracking
+    # And a new response stream to check for success/failure
+    transaction_id = str(uuid.uuid4())
+    response_stream = f"checkout:response:{transaction_id}"
+
+    # Create event data
+    event_data = {
+        "order_id": order_id,
+        "transaction_id": transaction_id,
+        "user_id": order_entry.user_id,
+        "items": formatted_items,
+        "total_cost": order_entry.total_cost,
+        "response_stream": response_stream
+    }
+
+    # Publish the ORDER_CREATED event to order:events stream
+    event = publish_event(ORDER_EVENTS, ORDER_CREATED, event_data)
+
+    if not event:
+        return abort(400, "Failed to publish order event")
+
+    app.logger.debug(f"Published ORDER_CREATED event for order {order_id}, transaction {transaction_id}")
+
+    # Wait for response
+    timeout = 15
+    start_time = time.time()
+
     try:
-        db.set(order_id, msgpack.encode(order_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    app.logger.debug("Checkout successful")
-    return Response("Checkout successful", status=200)
+        db.delete(response_stream)
+    except:
+        pass
+
+    # Poll for response with blocking call
+    while time.time() - start_time < timeout:
+        # Block for .1 seconds at a time
+        messages = db.xread({response_stream: '0-0'}, count=1, block=100)
+
+        if messages:
+            stream_name, stream_messages = messages[0]
+            message_id, message_data = stream_messages[0]
+
+            result = json.loads(message_data[b'result'].decode())
+            db.delete(response_stream)
+
+            if result.get('status') == 'success':
+                return Response("Checkout successful", status=200)
+            else:
+                return abort(400, result.get('reason', 'Unknown error'))
+
+    # Timeout occurred - return 400
+    return Response("Checkout initiated but processing is still ongoing - Timeout", status=400)
 
 
+
+def initialize_streams():
+    """Initialize Redis Streams and consumer groups"""
+    ensure_consumer_group(ORDER_EVENTS, "init-group")
+    app.logger.info("Order events stream initialized")
+
+
+def initialize_app():
+    app.logger.info("Initializing order service")
+    initialize_streams()
+
+
+initialize_app()
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)
 else:
