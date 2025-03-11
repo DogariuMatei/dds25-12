@@ -32,7 +32,10 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
 
-
+event_db: redis.Redis = redis.Redis( host=os.environ.get('EVENT_REDIS_HOST', 'localhost'),
+                        port=int(os.environ.get('REDIS_PORT', 6379)),
+                        password=os.environ.get('REDIS_PASSWORD', ''),
+                        db=int(os.environ.get('REDIS_DB', 0)))
 def close_db_connection():
     db.close()
 
@@ -53,7 +56,7 @@ def publish_event(stream, event_type, data):
         "transaction_id": data.get("transaction_id")
     }
     try:
-        db.xadd(stream, {b'event': json.dumps(event).encode()})
+        event_db.xadd(stream, {b'event': json.dumps(event).encode()})
         app.logger.debug(f"Published event {event_type} to {stream}")
         return event
     except Exception as e:
@@ -63,7 +66,7 @@ def publish_event(stream, event_type, data):
 def ensure_consumer_group(stream, group):
     """Create a consumer group if it doesn't exist"""
     try:
-        db.xgroup_create(stream, group, id='0-0', mkstream=True)
+        event_db.xgroup_create(stream, group, id='0-0', mkstream=True)
         app.logger.info(f"Created consumer group {group} for stream {stream}")
     except redis.exceptions.ResponseError as e:
         if 'BUSYGROUP' in str(e):  # Group already exists
@@ -217,7 +220,7 @@ def remove_credit_async( user_id: str, amount: int):
 
 def add_to_response_stream(response_stream, status, order_id, reason=None):
     # Publish failed result to the order-service specific stream
-    db.xadd(response_stream, {
+    event_db.xadd(response_stream, {
         b'result': json.dumps({
             "status": status,
             "reason": reason,
@@ -235,7 +238,7 @@ def process_stock_events():
     while True:
         try:
             # Read new messages
-            messages = db.xreadgroup(
+            messages = event_db.xreadgroup(
                 PAYMENT_STOCK_GROUP,
                 consumer_name,
                 {STOCK_EVENTS: '>'},

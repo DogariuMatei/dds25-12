@@ -32,11 +32,15 @@ STOCK_PAYMENT_GROUP = "stock-payment-consumers"
 
 app = Flask("stock-service")
 
-db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
-                              port=int(os.environ['REDIS_PORT']),
-                              password=os.environ['REDIS_PASSWORD'],
-                              db=int(os.environ['REDIS_DB']))
+db: redis.Redis = redis.Redis( host=os.environ['REDIS_HOST'],
+                               port=int(os.environ['REDIS_PORT']),
+                               password=os.environ['REDIS_PASSWORD'],
+                               db=int(os.environ['REDIS_DB']))
 
+event_db: redis.Redis = redis.Redis( host=os.environ.get('EVENT_REDIS_HOST', 'localhost'),
+                        port=int(os.environ.get('REDIS_PORT', 6379)),
+                        password=os.environ.get('REDIS_PASSWORD', ''),
+                        db=int(os.environ.get('REDIS_DB', 0)))
 
 def close_db_connection():
     db.close()
@@ -61,8 +65,8 @@ def publish_event(stream, event_type, data):
         "transaction_id": data.get("transaction_id")
     }
     try:
-        db.xadd(stream, {b'event': json.dumps(event).encode()})
-        app.logger.debug(f"Published event {event_type} to {stream}")
+        event_db.xadd(stream, {b'event': json.dumps(event).encode()})
+        app.logger.info(f"Published event {event_type} to {stream}")
         return event
     except Exception as e:
         app.logger.error(f"Failed to publish event: {e}")
@@ -72,11 +76,11 @@ def publish_event(stream, event_type, data):
 def ensure_consumer_group(stream, group):
     """Create a consumer group if it doesn't exist"""
     try:
-        db.xgroup_create(stream, group, id='0-0', mkstream=True)
+        event_db.xgroup_create(stream, group, mkstream=True)
         app.logger.info(f"Created consumer group {group} for stream {stream}")
     except redis.exceptions.ResponseError as e:
         if 'BUSYGROUP' in str(e):  # Group already exists
-            app.logger.debug(f"Consumer group {group} already exists for stream {stream}")
+            app.logger.info(f"Consumer group {group} already exists for stream {stream}")
             pass
         else:
             app.logger.error(f"Error creating consumer group: {e}")
@@ -100,7 +104,6 @@ def get_item_from_db(item_id: str) -> StockValue | None:
 @app.post('/item/create/<price>')
 def create_item(price: int):
     key = str(uuid.uuid4())
-    app.logger.debug(f"Item: {key} created")
     value = msgpack.encode(StockValue(stock=0, price=int(price), reserved=0))
     try:
         db.set(key, value)
@@ -164,7 +167,7 @@ def remove_stock(item_id: str, amount: int):
 
         # Reserve the stock rather than immediately subtracting
         item_entry.reserved += amount
-        app.logger.debug(f"Item: {item_id} stock reserved: {item_entry.reserved}")
+        app.logger.info(f"Item: {item_id} stock reserved: {item_entry.reserved}")
 
         try:
             db.set(item_id, msgpack.encode(item_entry))
@@ -201,14 +204,14 @@ def make_reservation(item_id, amount):
 
         # Check stock availability
         if item_entry.stock - item_entry.reserved < amount:
-            app.logger.error(
-                f"Not enough stock for item {item_id}: requested {amount}, available {item_entry.stock - item_entry.reserved}")
+            app.logger.error(f"Not enough stock for item {item_id}: requested {amount}, available {item_entry.stock - item_entry.reserved}")
             return False
 
         # Reserve the stock
         item_entry.reserved += amount
         db.set(item_id, msgpack.encode(item_entry))
-        app.logger.debug(f"Reserved {amount} units of item {item_id}")
+        app.logger.info(f"Reserved {amount} units of item {item_id}")
+        return True
 
     finally:
         # Release the lock
@@ -320,18 +323,20 @@ def process_order_events():
 
     while True:
         try:
-            messages = db.xreadgroup(
+            message = event_db.xreadgroup(
                 STOCK_ORDER_GROUP,
                 consumer_name,
                 {ORDER_EVENTS: '>'},
-                count=10,
-                block=2000
+                count=1,
+                block=1000
             )
+            # message = event_db.xread(streams={ORDER_EVENTS:0-0})
 
-            if not messages:
+            if not message:
                 continue
 
-            for stream_name, stream_messages in messages:
+            app.logger.info(f"Stock got message: {message}")
+            for stream_name, stream_messages in message:
                 for message_id, message in stream_messages:
                     event = json.loads(message[b'event'].decode())
 
@@ -339,7 +344,7 @@ def process_order_events():
                         event_type = event.get('type')
                         event_data = event.get('data', {})
 
-                        app.logger.debug(f"Processing order event: {event_type}")
+                        app.logger.info(f"Processing order event: {event_type}")
 
                         if event_type == ORDER_CREATED:
                             transaction_id = event_data.get('transaction_id')
@@ -357,7 +362,7 @@ def process_order_events():
                             # Try to reserve
                             for item in items:
                                 item_id = item.get('item_id')
-                                amount = int(item.get('quantity', 0))
+                                amount = int(item.get('amount'))
                                 try:
                                     reservation_success = make_reservation(item_id, amount)
                                     if reservation_success:
@@ -374,10 +379,12 @@ def process_order_events():
                                     try:
                                         release_reservation(item_id, amount)
                                         # Publish failed result to the order-service
-                                        db.xadd(response_stream, {
+                                        app.logger.warning(f"Released reservation")
+                                        app.logger.warning(f"Posted failure in response_stream {response_stream}")
+                                        event_db.xadd(response_stream, {
                                             b'result': json.dumps({
                                                 "status": "failed",
-                                                "reason": "Failed to reserve item",
+                                                "reason": "FAILED_RESERVATION",
                                                 "order_id": event_data.get('order_id')
                                             }).encode()
                                         })
@@ -396,10 +403,9 @@ def process_order_events():
                                     "items": items,
                                     "response_stream": response_stream
                                 })
-                            app.logger.debug(f"Order {order_id} contains {len(items)} items")
 
                         # Acknowledge the message
-                        db.xack(stream_name, STOCK_ORDER_GROUP, message_id)
+                        event_db.xack(stream_name, STOCK_ORDER_GROUP, message_id)
 
                     except Exception as e:
                         app.logger.error(f"Error processing order event {message_id}: {e}")
@@ -417,7 +423,7 @@ def process_payment_events():
 
     while True:
         try:
-            messages = db.xreadgroup(
+            messages = event_db.xreadgroup(
                 STOCK_PAYMENT_GROUP,
                 consumer_name,
                 {PAYMENT_EVENTS: '>'},
@@ -436,7 +442,7 @@ def process_payment_events():
                         event_type = event.get('type')
                         event_data = event.get('data', {})
 
-                        app.logger.debug(f"Processing payment event: {event_type}")
+                        app.logger.info(f"Processing payment event: {event_type}")
 
                         if event_type == PAYMENT_FAILED:
                             transaction_id = event_data.get('transaction_id')

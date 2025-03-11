@@ -34,11 +34,15 @@ GATEWAY_URL = os.environ['GATEWAY_URL']
 
 app = Flask("order-service")
 
-db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
-                              port=int(os.environ['REDIS_PORT']),
-                              password=os.environ['REDIS_PASSWORD'],
-                              db=int(os.environ['REDIS_DB']))
+db: redis.Redis = redis.Redis( host=os.environ['REDIS_HOST'],
+                               port=int(os.environ['REDIS_PORT']),
+                               password=os.environ['REDIS_PASSWORD'],
+                               db=int(os.environ['REDIS_DB']))
 
+event_db: redis.Redis = redis.Redis( host=os.environ.get('EVENT_REDIS_HOST', 'localhost'),
+                        port=int(os.environ.get('REDIS_PORT', 6379)),
+                        password=os.environ.get('REDIS_PASSWORD', ''),
+                        db=int(os.environ.get('REDIS_DB', 0)))
 
 def close_db_connection():
     db.close()
@@ -59,22 +63,20 @@ def publish_event(stream, event_type, data):
     event = {
         "type": event_type,
         "data": data,
-        "timestamp": int(time.time() * 1000),
-        "transaction_id": data.get("transaction_id", str(uuid.uuid4()))
     }
     try:
-        db.xadd(stream, {b'event': json.dumps(event).encode()})
-        app.logger.debug(f"Published event {event_type} to {stream}")
+        event_db.xadd(stream, {b'event': json.dumps(event).encode()})
+        app.logger.info(f"Published event {event_type} to {stream}")
         return event
     except Exception as e:
-        app.logger.error(f"Failed to publish event: {e}")
+        app.logger.info(f"Failed to publish event: {e}")
         return None
 
 
 def ensure_consumer_group(stream, group):
     """Create a consumer group if it doesn't exist"""
     try:
-        db.xgroup_create(stream, group, id='0-0', mkstream=True)
+        event_db.xgroup_create(stream, group, id='0-0', mkstream=True)
         app.logger.info(f"Created consumer group {group} for stream {stream}")
     except redis.exceptions.ResponseError as e:
         if 'BUSYGROUP' in str(e):  # Group already exists
@@ -192,14 +194,14 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
-    app.logger.debug(f"Checking out {order_id}")
+    app.logger.info(f"Checking out {order_id}")
 
     order_entry: OrderValue = get_order_from_db(order_id)
-
+    app.logger.info(f"Got order from db")
     # Check if order is already paid
     if order_entry.paid:
         return Response(f'Order {order_id} already paid", status=200')
-
+    app.logger.info(f"Not already paid")
     formatted_items = []
     for item_id, amount in order_entry.items:
         formatted_items.append({
@@ -207,10 +209,10 @@ def checkout(order_id: str):
             "amount": amount
         })
 
-    # Generate a transaction ID for tracking
     # And a new response stream to check for success/failure
     transaction_id = str(uuid.uuid4())
     response_stream = f"checkout:response:{transaction_id}"
+    app.logger.info(f"Created response stream for new transaction {response_stream}")
 
     # Create event data
     event_data = {
@@ -231,30 +233,33 @@ def checkout(order_id: str):
     app.logger.debug(f"Published ORDER_CREATED event for order {order_id}, transaction {transaction_id}")
 
     # Wait for response
-    timeout = 15
+    timeout = 5
     start_time = time.time()
 
-    try:
-        db.delete(response_stream)
-    except:
-        pass
+    # try:
+    #     db.delete(response_stream)
+    # except:
+    #     pass
 
     # Poll for response with blocking call
     while time.time() - start_time < timeout:
         # Block for .1 seconds at a time
-        messages = db.xread({response_stream: '0-0'}, count=1, block=100)
+        messages = event_db.xread({response_stream: '0'}, count=1, block=100)
+        # messages = event_db.xread({response_stream: '0'})
 
         if messages:
             stream_name, stream_messages = messages[0]
             message_id, message_data = stream_messages[0]
 
             result = json.loads(message_data[b'result'].decode())
-            db.delete(response_stream)
+            event_db.delete(response_stream)
 
             if result.get('status') == 'success':
+                app.logger.info(f"Success order checkout id: {order_id}")
                 return Response("Checkout successful", status=200)
             else:
-                return abort(400, result.get('reason', 'Unknown error'))
+                app.logger.info(f"Failed order checkout id: {order_id}")
+                return abort(400, result.get('reason'))
 
     # Timeout occurred - return 400
     return Response("Checkout initiated but processing is still ongoing - Timeout", status=400)
