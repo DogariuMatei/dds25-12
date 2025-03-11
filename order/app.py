@@ -233,7 +233,7 @@ def checkout(order_id: str):
     app.logger.debug(f"Published ORDER_CREATED event for order {order_id}, transaction {transaction_id}")
 
     # Wait for response
-    timeout = 5
+    timeout = 1
     start_time = time.time()
 
     # try:

@@ -330,12 +330,11 @@ def process_order_events():
                 count=1,
                 block=1000
             )
-            # message = event_db.xread(streams={ORDER_EVENTS:0-0})
+
 
             if not message:
                 continue
 
-            app.logger.info(f"Stock got message: {message}")
             for stream_name, stream_messages in message:
                 for message_id, message in stream_messages:
                     event = json.loads(message[b'event'].decode())
@@ -375,25 +374,24 @@ def process_order_events():
                             # If any reservation failed, roll back all successful reservations
                             if not reservation_success:
                                 app.logger.warning(f"Rolling back reservations for order {order_id}")
+                                # Publish failed result to the order-service
+                                app.logger.warning(f"Released reservation")
+                                app.logger.warning(f"Posted failure in response_stream {response_stream}")
+                                event_db.xadd(response_stream, {
+                                    b'result': json.dumps({
+                                        "status": "failed",
+                                        "reason": "FAILED_RESERVATION",
+                                        "order_id": event_data.get('order_id')
+                                    }).encode()
+                                })
                                 for item_id, amount in reserved_items:
                                     try:
                                         release_reservation(item_id, amount)
-                                        # Publish failed result to the order-service
-                                        app.logger.warning(f"Released reservation")
-                                        app.logger.warning(f"Posted failure in response_stream {response_stream}")
-                                        event_db.xadd(response_stream, {
-                                            b'result': json.dumps({
-                                                "status": "failed",
-                                                "reason": "FAILED_RESERVATION",
-                                                "order_id": event_data.get('order_id')
-                                            }).encode()
-                                        })
                                     except Exception as e:
                                         app.logger.error(f"Error rolling back reservation for item {item_id}: {e}")
                             else:
                                 # All reservations successful
                                 app.logger.info(f"Successfully reserved all items for order {order_id}")
-
                                 # Publish stock reserved event
                                 publish_event(STOCK_EVENTS, STOCK_RESERVED, {
                                     "order_id": order_id,
