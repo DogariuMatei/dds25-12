@@ -19,8 +19,9 @@ REQ_ERROR_STR = "Requests error"
 
 # Stream keys
 ORDER_EVENTS = "order:events"
-PAYMENT_EVENTS = "payment:events"
-STOCK_EVENTS = "stock:events"
+
+# PAYMENT_EVENTS = "payment:events"
+# STOCK_EVENTS = "stock:events"
 
 # Event types
 ORDER_CREATED = "order.created" # we post
@@ -79,7 +80,7 @@ def ensure_consumer_group(stream, group):
         event_db.xgroup_create(stream, group, id='0-0', mkstream=True)
         app.logger.info(f"Created consumer group {group} for stream {stream}")
     except redis.exceptions.ResponseError as e:
-        if 'BUSYGROUP' in str(e):  # Group already exists
+        if 'BUSYGROUP' in str(e):
             app.logger.debug(f"Consumer group {group} already exists for stream {stream}")
             pass
         else:
@@ -195,13 +196,11 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
     app.logger.info(f"Checking out {order_id}")
-
     order_entry: OrderValue = get_order_from_db(order_id)
-    app.logger.info(f"Got order from db")
-    # Check if order is already paid
+
     if order_entry.paid:
-        return Response(f'Order {order_id} already paid", status=200')
-    app.logger.info(f"Not already paid")
+        return Response(f'Order {order_id} already paid', status=200)
+
     formatted_items = []
     for item_id, amount in order_entry.items:
         formatted_items.append({
@@ -209,12 +208,10 @@ def checkout(order_id: str):
             "amount": amount
         })
 
-    # And a new response stream to check for success/failure
     transaction_id = str(uuid.uuid4())
-    response_stream = f"checkout:response:{transaction_id}"
-    app.logger.info(f"Created response stream for new transaction {response_stream}")
+    response_stream = f"order:response:{transaction_id}"
 
-    # Create event data
+    # Event data
     event_data = {
         "order_id": order_id,
         "transaction_id": transaction_id,
@@ -224,44 +221,35 @@ def checkout(order_id: str):
         "response_stream": response_stream
     }
 
-    # Publish the ORDER_CREATED event to order:events stream
+    # Publish the ORDER_CREATED event
     event = publish_event(ORDER_EVENTS, ORDER_CREATED, event_data)
 
     if not event:
         return abort(400, "Failed to publish order event")
 
-    app.logger.debug(f"Published ORDER_CREATED event for order {order_id}, transaction {transaction_id}")
+    app.logger.debug(f"Published ORDER_CREATED event for order {order_id}")
 
-    # Wait for response
-    timeout = 1
+
+    timeout = 10
     start_time = time.time()
 
-    # try:
-    #     db.delete(response_stream)
-    # except:
-    #     pass
-
-    # Poll for response with blocking call
     while time.time() - start_time < timeout:
-        # Block for .1 seconds at a time
-        messages = event_db.xread({response_stream: '0'}, count=1, block=100)
-        # messages = event_db.xread({response_stream: '0'})
+        messages = event_db.xread({response_stream: '0'}, count=1)
 
         if messages:
             stream_name, stream_messages = messages[0]
             message_id, message_data = stream_messages[0]
-
             result = json.loads(message_data[b'result'].decode())
-            event_db.delete(response_stream)
-
-            if result.get('status') == 'success':
+            if result.get('status') == "success":
                 app.logger.info(f"Success order checkout id: {order_id}")
-                return Response("Checkout successful", status=200)
+                event_db.delete(response_stream)
+                return Response(f"Checkout successful: {result.get('reason')}", status=200)
             else:
                 app.logger.info(f"Failed order checkout id: {order_id}")
+                event_db.delete(response_stream)
                 return abort(400, result.get('reason'))
 
-    # Timeout occurred - return 400
+    event_db.delete(response_stream)
     return Response("Checkout initiated but processing is still ongoing - Timeout", status=400)
 
 

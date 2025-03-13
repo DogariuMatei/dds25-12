@@ -61,7 +61,6 @@ def publish_event(stream, event_type, data):
     event = {
         "type": event_type,
         "data": data,
-        "timestamp": int(time.time() * 1000),
         "transaction_id": data.get("transaction_id")
     }
     try:
@@ -72,6 +71,14 @@ def publish_event(stream, event_type, data):
         app.logger.error(f"Failed to publish event: {e}")
         return None
 
+def add_to_response_stream(response_stream, order_id, status, reason=None):
+    event_db.xadd(response_stream, {
+        b'result': json.dumps({
+            "status": status,
+            "reason": reason,
+            "order_id": order_id,
+        }).encode()
+    })
 
 def ensure_consumer_group(stream, group):
     """Create a consumer group if it doesn't exist"""
@@ -85,6 +92,7 @@ def ensure_consumer_group(stream, group):
         else:
             app.logger.error(f"Error creating consumer group: {e}")
             raise
+
 
 
 def get_item_from_db(item_id: str) -> StockValue | None:
@@ -248,15 +256,6 @@ def release_reservation(item_id, amount):
         try:
             db.set(item_id, msgpack.encode(item_entry))
             app.logger.info(f"Released reservation for item {item_id}, amount {amount}")
-
-            # # Publish stock released event
-            # publish_event(STOCK_EVENTS, STOCK_RELEASED, {
-            #     "item_id": item_id,
-            #     "amount": amount,
-            #     "remaining_reserved": item_entry.reserved,
-            #     "available": item_entry.stock - item_entry.reserved
-            # })
-
             return True
 
         except redis.exceptions.RedisError as e:
@@ -327,10 +326,8 @@ def process_order_events():
                 STOCK_ORDER_GROUP,
                 consumer_name,
                 {ORDER_EVENTS: '>'},
-                count=1,
-                block=1000
+                count=1
             )
-
 
             if not message:
                 continue
@@ -356,43 +353,33 @@ def process_order_events():
                             app.logger.info(f"Trying to reserve stock for order {order_id}")
 
                             reserved_items = []
-                            reservation_success = True
+                            reservation_success = []
 
                             # Try to reserve
                             for item in items:
                                 item_id = item.get('item_id')
                                 amount = int(item.get('amount'))
                                 try:
-                                    reservation_success = make_reservation(item_id, amount)
-                                    if reservation_success:
+                                    res = make_reservation(item_id, amount)
+                                    reservation_success.append(res)
+                                    if reservation_success[-1]:
                                         reserved_items.append((item_id, amount))
                                 except Exception as e:
                                     app.logger.error(f"Error reserving item {item_id}: {e}")
-                                    reservation_success = False
+                                    reservation_success[-1] = False
                                     break
 
                             # If any reservation failed, roll back all successful reservations
-                            if not reservation_success:
+                            if not all(reservation_success):
                                 app.logger.warning(f"Rolling back reservations for order {order_id}")
-                                # Publish failed result to the order-service
-                                app.logger.warning(f"Released reservation")
-                                app.logger.warning(f"Posted failure in response_stream {response_stream}")
-                                event_db.xadd(response_stream, {
-                                    b'result': json.dumps({
-                                        "status": "failed",
-                                        "reason": "FAILED_RESERVATION",
-                                        "order_id": event_data.get('order_id')
-                                    }).encode()
-                                })
                                 for item_id, amount in reserved_items:
                                     try:
                                         release_reservation(item_id, amount)
                                     except Exception as e:
                                         app.logger.error(f"Error rolling back reservation for item {item_id}: {e}")
+                                add_to_response_stream(response_stream, order_id, "failed", "FAILED_TO_RESERVE")
                             else:
-                                # All reservations successful
                                 app.logger.info(f"Successfully reserved all items for order {order_id}")
-                                # Publish stock reserved event
                                 publish_event(STOCK_EVENTS, STOCK_RESERVED, {
                                     "order_id": order_id,
                                     "transaction_id": transaction_id,
@@ -425,8 +412,7 @@ def process_payment_events():
                 STOCK_PAYMENT_GROUP,
                 consumer_name,
                 {PAYMENT_EVENTS: '>'},
-                count=10,
-                block=2000
+                count=1
             )
 
             if not messages:
@@ -443,36 +429,53 @@ def process_payment_events():
                         app.logger.info(f"Processing payment event: {event_type}")
 
                         if event_type == PAYMENT_FAILED:
-                            transaction_id = event_data.get('transaction_id')
                             order_id = event_data.get('order_id')
                             items = event_data.get('items', [])
+                            response_stream = event_data.get('response_stream')
+                            reason = "PAYMENT_FAILED"
 
                             app.logger.info(f"Payment failed for order {order_id}, releasing stock")
-
                             for item in items:
                                 item_id = item.get('item_id')
-                                amount = item.get('quantity')
+                                amount = item.get('amount')
 
                                 if item_id and amount:
                                     success = release_reservation(item_id, amount)
                                     if not success:
-                                        app.logger.error(f"Failed to release reservation for item {item_id}")
+                                        reason = f"Failed to release reservation for item {item_id}"
+                                        app.logger.error(reason)
+
+                            add_to_response_stream(response_stream, order_id,"failed", reason)
 
                         elif event_type == PAYMENT_SUCCEEDED:
                             transaction_id = event_data.get('transaction_id')
                             order_id = event_data.get('order_id')
                             items = event_data.get('items', [])
+                            response_stream = event_data.get('response_stream')
 
                             app.logger.info(f"Payment succeeded transaction {transaction_id} for order {order_id} -> confirming stock reduction")
 
+                            subtraction_success = []
+
                             for item in items:
                                 item_id = item.get('item_id')
-                                amount = item.get('quantity')
+                                amount = item.get('amount')
 
                                 if item_id and amount:
-                                    success = confirm_reservation(item_id, amount)
-                                    if not success:
-                                        app.logger.error(f"Failed to confirm stock reduction for item {item_id}")
+                                    res = confirm_reservation(item_id, amount)
+                                    subtraction_success.append(res)
+                                    if not subtraction_success[-1]:
+                                        # TODO MAKE SURE PAYMENT ALSO IS REVERTED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                                        app.logger.error(f"Failed to confirm reservation for item {item_id} but PAYMENT was SUCCESS")
+
+                            if all(subtraction_success):
+                                reason = "Stock reservation OK, payment OK, stock confirmation OK"
+                                app.logger.info(f"Successfully confirmed reservation")
+                                add_to_response_stream(response_stream, order_id, "success", reason)
+                            else:
+                                reason = f"Failed to confirm reservation but PAYMENT was SUCCESS"
+                                app.logger.error(reason)
+                                add_to_response_stream(response_stream, order_id, "failed", reason)
 
                         db.xack(stream_name, STOCK_PAYMENT_GROUP, message_id)
 
