@@ -4,3 +4,4 @@ gunicorn==21.2.0
 msgspec==0.18.6
 requests==2.32.0
 aiohttp==3.9.0b0
+rq==2.1.0

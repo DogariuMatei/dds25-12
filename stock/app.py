@@ -2,12 +2,10 @@ import logging
 import os
 import atexit
 import uuid
-
 import redis
 
 from msgspec import msgpack, Struct
-from flask import Flask, jsonify, abort, Response
-
+from flask import Flask, jsonify, abort, Response, request
 
 DB_ERROR_STR = "DB error"
 
@@ -92,6 +90,62 @@ def add_stock(item_id: str, amount: int):
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+
+
+@app.post('/process')
+def process_order():
+    request_data = request.get_json()
+    order_id = request_data.get("order_id")
+    items = request_data.get("items", [])
+
+    if not items:
+        return abort(400, "No items provided")
+
+    pipe = db.pipeline()
+    try:
+        for item in items:
+            item_id = item["item_id"]
+            pipe.watch(item_id)
+            item_entry: StockValue = get_item_from_db(item_id)
+            if item_entry.stock < item["quantity"]:
+                return abort(400, "Insufficient Stock")
+        pipe.multi()
+        for item in items:
+            item_id = item["item_id"]
+            item_entry: StockValue = get_item_from_db(item_id)
+            item_entry.stock -= item["quantity"]
+            pipe.set(item_id, msgpack.encode(item_entry))
+        pipe.execute()
+        return Response(f"Order: {order_id} successfully processed", status=200)
+    except redis.exceptions.WatchError:
+        return abort(400, "Stock changed during transaction, please retry")
+    finally:
+        pipe.reset()
+
+
+@app.post('/cancel')
+def cancel_order():
+    request_data = request.get_json()
+    order_id = request_data.get("order_id")
+    items = request_data.get("items", [])
+
+    if not items:
+        return abort(400, "No items provided")
+
+    pipe = db.pipeline()
+    try:
+        pipe.multi()
+        for item in items:
+            item_id = item["item_id"]
+            item_entry: StockValue = get_item_from_db(item_id)
+            item_entry.stock += item["quantity"]
+            pipe.set(item_id, msgpack.encode(item_entry))
+        pipe.execute()
+        return Response(f"Item: {order_id} successfully cancelled", status=200)
+    except redis.exceptions.WatchError:
+        return abort(400, "Stock changed during transaction, please retry")
+    finally:
+        pipe.reset()
 
 
 @app.post('/subtract/<item_id>/<amount>')

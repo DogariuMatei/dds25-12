@@ -9,6 +9,13 @@ spec:
  rules:
    - http:
       paths:
+        - path: /orchestrator/?(.*)
+          pathType: Prefix
+          backend:
+            service:
+              name: orchestrator-service
+              port:
+                number: 5000
         - path: /orders/?(.*)
           pathType: Prefix
           backend:

@@ -8,9 +8,25 @@ services:
     ports:
       - "8000:80"
     depends_on:
+      - orchestrator-service
       - order-service
       - stock-service
       - payment-service
+
+  orchestrator-service:
+    build: ./orchestrator
+    image: orchestrator:latest
+    environment:
+      - GATEWAY_URL=http://gateway:80
+    command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
+    env_file:
+      - env/orchestrator_redis.env
+    depends_on:
+      - orchestrator-db
+
+  orchestrator-db:
+    image: redis:7.2-bookworm
+    command: redis-server --requirepass redis --maxmemory 512mb
 
   order-service:
     build: ./order
