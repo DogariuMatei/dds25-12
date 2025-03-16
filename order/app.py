@@ -242,7 +242,7 @@ def checkout(order_id: str):
 
     event_db.delete(response_stream)
     app.logger.warning(f"TIMED OUT WAITING FOR RESPONSE")
-    return Response("Checkout initiated but processing is still ongoing - Timeout", status=400)
+    return abort(400, "Checkout initiated but processing is still ongoing - Timeout")
 
 
 

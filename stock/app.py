@@ -362,7 +362,7 @@ def confirm_reservations(items):
             amount = int(amount)
 
             if item_entry.reserved < amount:
-                app.logger.error(f"Not enough reserved stock for item {item_id}")
+                app.logger.error(f"Not enough reserved stock for item")
                 success = False
                 break
 
