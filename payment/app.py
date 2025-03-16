@@ -106,6 +106,69 @@ def remove_credit(user_id: str, amount: int):
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
 
+@app.post("/prepare_pay/<txn_id>/<user_id>/<amount>")
+def prepare_pay(txn_id: str, user_id: str, amount: int):
+    user = get_user_from_db(user_id)
+    amt = int(amount)
+
+    if user.credit < amt:
+        abort(400, "Not enough credit")
+
+    user.credit -= amt
+    if user.credit < 0:
+        abort(400, "User credit cannot be negative")
+
+    try:
+        db.set(user_id, msgpack.encode(user))
+    except redis.exceptions.RedisError:
+        abort(400, DB_ERROR_STR)
+
+    try:
+        db.hset(f"txn:{txn_id}:payment", mapping={"user_id": user_id, "amount": amt})
+    except redis.exceptions.RedisError:
+        abort(400, DB_ERROR_STR)
+
+    return Response("Payment prepared", status=200)
+
+@app.post("/commit/<txn_id>")
+def commit_payment(txn_id: str):
+
+    key = f"txn:{txn_id}:payment"
+    try:
+        db.delete(key)
+    except redis.exceptions.RedisError:
+        abort(400, DB_ERROR_STR)
+
+    return Response("Payment commit successful", status=200)
+
+@app.post("/abort/<txn_id>")
+def abort_payment(txn_id: str):
+
+    key = f"txn:{txn_id}:payment"
+
+    try:
+        data = db.hgetall(key)
+        if not data:
+            return Response("No payment reservation found", status=200)
+
+        user_id = data[b'user_id'].decode()
+        amount = int(data[b'amount'].decode())
+
+        user = get_user_from_db(user_id)
+        user.credit += amount
+        db.set(user_id, msgpack.encode(user))
+
+        db.delete(key)
+
+    except redis.exceptions.RedisError:
+        abort(400, DB_ERROR_STR)
+
+    return Response("Payment abort successful", status=200)
+
+
+
+
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)
 else:

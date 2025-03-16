@@ -97,7 +97,7 @@ def add_stock(item_id: str, amount: int):
 @app.post('/subtract/<item_id>/<amount>')
 def remove_stock(item_id: str, amount: int):
     item_entry: StockValue = get_item_from_db(item_id)
-    # update stock, serialize and update database
+
     item_entry.stock -= int(amount)
     app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
     if item_entry.stock < 0:
@@ -107,6 +107,67 @@ def remove_stock(item_id: str, amount: int):
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+
+
+@app.post('/prepare_subtract/<txn_id>/<item_id>/<amount>')
+def prepare_subtract(txn_id: str, item_id: str, amount: int):
+
+    item_entry = get_item_from_db(item_id)
+    amt = int(amount)
+
+    if item_entry.stock < amt:
+        abort(400, f"Not enough stock on item {item_id}")
+
+    item_entry.stock -= amt
+    if item_entry.stock < 0:
+        abort(400, "Item stock cannot be negative")
+
+    try:
+        db.set(item_id, msgpack.encode(item_entry))
+    except redis.exceptions.RedisError:
+        abort(400, DB_ERROR_STR)
+
+    try:
+        db.hset(f"txn:{txn_id}:stock", item_id, amt)
+    except redis.exceptions.RedisError:
+        abort(400, DB_ERROR_STR)
+
+    return Response(f"Stock reserved for item {item_id}: {amt}", status=200)
+
+@app.post('/commit/<txn_id>')
+def commit_stock(txn_id: str):
+
+    reservation_key = f"txn:{txn_id}:stock"
+    try:
+        db.delete(reservation_key)
+    except redis.exceptions.RedisError:
+        abort(400, DB_ERROR_STR)
+
+    return Response("Stock commit successful", status=200)
+
+@app.post('/abort/<txn_id>')
+def abort_stock(txn_id: str):
+
+    reservation_key = f"txn:{txn_id}:stock"
+
+    try:
+        items_reserved = db.hgetall(reservation_key)
+        for (item_id_bytes, amt_bytes) in items_reserved.items():
+            item_id_str = item_id_bytes.decode()
+            amt_int = int(amt_bytes.decode())
+
+            item_entry = get_item_from_db(item_id_str)
+            item_entry.stock += amt_int
+            db.set(item_id_str, msgpack.encode(item_entry))
+
+        db.delete(reservation_key)
+    except redis.exceptions.RedisError:
+        abort(400, DB_ERROR_STR)
+
+    return Response("Stock abort completed", status=200)
+
+
+
 
 
 if __name__ == '__main__':

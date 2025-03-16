@@ -41,11 +41,11 @@ class OrderValue(Struct):
 
 def get_order_from_db(order_id: str) -> OrderValue | None:
     try:
-        # get serialized data
+
         entry: bytes = db.get(order_id)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
+
     entry: OrderValue | None = msgpack.decode(entry, type=OrderValue) if entry else None
     if entry is None:
         # if order does not exist in the database; abort
@@ -128,7 +128,7 @@ def add_item(order_id: str, item_id: str, quantity: int):
     order_entry: OrderValue = get_order_from_db(order_id)
     item_reply = send_get_request(f"{GATEWAY_URL}/stock/find/{item_id}")
     if item_reply.status_code != 200:
-        # Request failed because item does not exist
+
         abort(400, f"Item: {item_id} does not exist!")
     item_json: dict = item_reply.json()
     order_entry.items.append((item_id, int(quantity)))
@@ -148,34 +148,55 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
-    app.logger.debug(f"Checking out {order_id}")
+
+    app.logger.debug(f"Checking out order {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
-    # get the quantity per item
+
+    transaction_id = str(uuid.uuid4())
+
     items_quantities: dict[str, int] = defaultdict(int)
-    for item_id, quantity in order_entry.items:
+    for (item_id, quantity) in order_entry.items:
         items_quantities[item_id] += quantity
-    # The removed items will contain the items that we already have successfully subtracted stock from
-    # for rollback purposes.
-    removed_items: list[tuple[str, int]] = []
+
+
+    # --- PHASE 1: PREPARE ---
+
+
+    prepared_items = []
     for item_id, quantity in items_quantities.items():
-        stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
-        if stock_reply.status_code != 200:
-            # If one item does not have enough stock we need to rollback
-            rollback_stock(removed_items)
-            abort(400, f'Out of stock on item_id: {item_id}')
-        removed_items.append((item_id, quantity))
-    user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-    if user_reply.status_code != 200:
-        # If the user does not have enough credit we need to rollback all the item stock subtractions
-        rollback_stock(removed_items)
-        abort(400, "User out of credit")
+        url_prepare_stock = f"{GATEWAY_URL}/stock/prepare_subtract/{transaction_id}/{item_id}/{quantity}"
+        stock_resp = send_post_request(url_prepare_stock)
+        if stock_resp.status_code != 200:
+            send_post_request(f"{GATEWAY_URL}/stock/abort/{transaction_id}")
+            abort(400, f"Failed to prepare stock for item {item_id}")
+        prepared_items.append((item_id, quantity))
+
+    url_prepare_pay = f"{GATEWAY_URL}/payment/prepare_pay/{transaction_id}/{order_entry.user_id}/{order_entry.total_cost}"
+    pay_resp = send_post_request(url_prepare_pay)
+    if pay_resp.status_code != 200:
+        send_post_request(f"{GATEWAY_URL}/stock/abort/{transaction_id}")
+        abort(400, "Not enough credit to prepare payment")
+
+
+    # --- PHASE 2: COMMIT ---
+
+
+    stock_commit_resp = send_post_request(f"{GATEWAY_URL}/stock/commit/{transaction_id}")
+    if stock_commit_resp.status_code != 200:
+        abort(500, "Failed to commit stock")
+
+    payment_commit_resp = send_post_request(f"{GATEWAY_URL}/payment/commit/{transaction_id}")
+    if payment_commit_resp.status_code != 200:
+        abort(500, "Failed to commit payment")
+
     order_entry.paid = True
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    app.logger.debug("Checkout successful")
-    return Response("Checkout successful", status=200)
+        abort(400, DB_ERROR_STR)
+
+    app.logger.debug("Checkout successful (2PC)")
+    return Response("Checkout successful (2PC)", status=200)
 
 
 if __name__ == '__main__':
