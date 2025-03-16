@@ -99,15 +99,14 @@ def release_lock(lock_key, lock_id):
 
 def user_locking(func):
     """
-    Decorator that implements locking for user payment operations.
-    Similar to two_phase_locking but optimized for single user operations.
+    Decorator that implements two phase locking for user payment operations.
     """
 
     @wraps(func)
     def wrapper(user_id, amount, *args, **kwargs):
         lock_key = f"lock:user:{user_id}"
         lock_id = str(uuid.uuid4())
-        lock_timeout = 30
+        lock_timeout = 5
         retry_count = 5
         lock_acquired = False
 

@@ -100,8 +100,8 @@ def two_phase_locking(func):
     @wraps(func)
     def wrapper(items, *args, **kwargs):
         acquired_locks = {}
-        lock_timeout = 30
-        retry_count = 3
+        lock_timeout = 5
+        retry_count = 5
 
         # Acquire all locks
         for item in items:
