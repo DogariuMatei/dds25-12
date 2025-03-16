@@ -99,7 +99,7 @@ def process_order():
     items = request_data.get("items", [])
 
     if not items:
-        return abort(400, "No items provided")
+        return Response("No items provided", 400)
 
     pipe = db.pipeline()
     try:
@@ -108,7 +108,7 @@ def process_order():
             pipe.watch(item_id)
             item_entry: StockValue = get_item_from_db(item_id)
             if item_entry.stock < item["quantity"]:
-                return abort(400, "Insufficient Stock")
+                return Response("Insufficient Stock", 400)
         pipe.multi()
         for item in items:
             item_id = item["item_id"]
@@ -130,7 +130,7 @@ def cancel_order():
     items = request_data.get("items", [])
 
     if not items:
-        return abort(400, "No items provided")
+        return Response("No items provided", 400)
 
     pipe = db.pipeline()
     try:

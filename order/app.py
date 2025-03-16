@@ -157,7 +157,7 @@ def checkout(order_id: str):
 
     orchestrator_reply = send_post_request(f"{GATEWAY_URL}/orchestrator/handle", request_data)
     if orchestrator_reply.status_code != 200:
-        abort(400, f"Order failed")
+        return Response("Order: Orchestrator cancelled the order", status=400)
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
