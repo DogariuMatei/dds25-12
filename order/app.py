@@ -156,11 +156,9 @@ def checkout(order_id: str):
         "total_cost": total_cost
     }
 
-    start_time = time.time()
     orchestrator_reply = send_post_request(f"{GATEWAY_URL}/orchestrator/handle", request_data)
-    if time.time() - start_time > 5:
-        if orchestrator_reply.status_code != 200:
-            return Response(orchestrator_reply.text, status=400)
+    if orchestrator_reply.status_code != 200:
+        return abort(400, "orchestrator failed in order service")
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:

@@ -98,7 +98,7 @@ def remove_credit(user_id: str, amount: int):
     # update credit, serialize and update database
     user_entry.credit -= int(amount)
     if user_entry.credit < 0:
-        return Response(f"User: {user_id} credit cannot get reduced below zero!", 400)
+        return abort(400, "insufficient funds")
     try:
         db.set(user_id, msgpack.encode(user_entry))
     except redis.exceptions.RedisError:

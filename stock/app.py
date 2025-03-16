@@ -99,7 +99,7 @@ def process_order():
     items = request_data.get("items", [])
 
     if not items:
-        return Response("No items provided", 400)
+        return abort(400, "insufficient stock")
 
     pipe = db.pipeline()
     try:
