@@ -67,10 +67,9 @@ def publish_event(stream, event_type, data):
     }
     try:
         event_db.xadd(stream, {b'event': json.dumps(event).encode()})
-        app.logger.info(f"Published event {event_type} to {stream}")
         return event
     except Exception as e:
-        app.logger.info(f"Failed to publish event: {e}")
+        app.logger.error(f"Failed to publish event: {e}")
         return None
 
 
@@ -78,10 +77,8 @@ def ensure_consumer_group(stream, group):
     """Create a consumer group if it doesn't exist"""
     try:
         event_db.xgroup_create(stream, group, id='0-0', mkstream=True)
-        app.logger.info(f"Created consumer group {group} for stream {stream}")
     except redis.exceptions.ResponseError as e:
         if 'BUSYGROUP' in str(e):
-            app.logger.debug(f"Consumer group {group} already exists for stream {stream}")
             pass
         else:
             app.logger.error(f"Error creating consumer group: {e}")
@@ -195,7 +192,6 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
-    app.logger.info(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
 
     if order_entry.paid:
@@ -227,10 +223,7 @@ def checkout(order_id: str):
     if not event:
         return abort(400, "Failed to publish order event")
 
-    app.logger.debug(f"Published ORDER_CREATED event for order {order_id}")
-
-
-    timeout = 10
+    timeout = 1000000
     start_time = time.time()
 
     while time.time() - start_time < timeout:
@@ -241,15 +234,14 @@ def checkout(order_id: str):
             message_id, message_data = stream_messages[0]
             result = json.loads(message_data[b'result'].decode())
             if result.get('status') == "success":
-                app.logger.info(f"Success order checkout id: {order_id}")
                 event_db.delete(response_stream)
                 return Response(f"Checkout successful: {result.get('reason')}", status=200)
             else:
-                app.logger.info(f"Failed order checkout id: {order_id}")
                 event_db.delete(response_stream)
                 return abort(400, result.get('reason'))
 
     event_db.delete(response_stream)
+    app.logger.warning(f"TIMED OUT WAITING FOR RESPONSE")
     return Response("Checkout initiated but processing is still ongoing - Timeout", status=400)
 
 
@@ -257,7 +249,6 @@ def checkout(order_id: str):
 def initialize_streams():
     """Initialize Redis Streams and consumer groups"""
     ensure_consumer_group(ORDER_EVENTS, "init-group")
-    app.logger.info("Order events stream initialized")
 
 
 def initialize_app():

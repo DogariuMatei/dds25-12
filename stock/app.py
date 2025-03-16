@@ -10,6 +10,7 @@ import redis
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+from functools import wraps
 
 DB_ERROR_STR = "DB error"
 
@@ -22,6 +23,7 @@ PAYMENT_EVENTS = "payment:events"
 ORDER_CREATED = "order.created" # we consume
 STOCK_RESERVED = "stock.reserved" # we post
 STOCK_FAILED = "stock.failed" # we post
+STOCK_SUBTRACTION_FAILED = "stock.subtraction.failed"  # we post
 STOCK_RELEASED = "stock.released" # we post
 PAYMENT_FAILED = "payment.failed" # we consume
 PAYMENT_SUCCEEDED = "payment.succeeded" # we consume
@@ -65,7 +67,6 @@ def publish_event(stream, event_type, data):
     }
     try:
         event_db.xadd(stream, {b'event': json.dumps(event).encode()})
-        app.logger.info(f"Published event {event_type} to {stream}")
         return event
     except Exception as e:
         app.logger.error(f"Failed to publish event: {e}")
@@ -84,14 +85,72 @@ def ensure_consumer_group(stream, group):
     """Create a consumer group if it doesn't exist"""
     try:
         event_db.xgroup_create(stream, group, mkstream=True)
-        app.logger.info(f"Created consumer group {group} for stream {stream}")
+
     except redis.exceptions.ResponseError as e:
         if 'BUSYGROUP' in str(e):  # Group already exists
-            app.logger.info(f"Consumer group {group} already exists for stream {stream}")
             pass
         else:
             app.logger.error(f"Error creating consumer group: {e}")
             raise
+
+
+def two_phase_locking(func):
+    """Decorator that implements 2-Phase Locking for a batch of items."""
+
+    @wraps(func)
+    def wrapper(items, *args, **kwargs):
+        acquired_locks = {}
+        lock_timeout = 1000000
+        retry_count = 100
+
+        # Acquire all locks
+        for item in items:
+            item_id = item.get('item_id')
+            if not item_id:
+                continue
+
+            lock_key = f"lock:stock:{item_id}"
+            lock_id = str(uuid.uuid4())
+
+            # Try to acquire lock with retries
+            for attempt in range(retry_count):
+                lock_acquired = db.set(lock_key, lock_id, nx=True, ex=lock_timeout)
+                if lock_acquired:
+                    acquired_locks[lock_key] = lock_id
+                    break
+
+                if attempt < retry_count - 1:
+                    time.sleep(0.1 * (2 ** attempt))
+
+            # If we couldn't acquire this lock after retries, release all acquired locks and fail
+            if lock_key not in acquired_locks:
+                app.logger.error(f"Could not acquire lock for item {item_id} after {retry_count} attempts")
+                # Release all locks we've acquired so far
+                for key, id in acquired_locks.items():
+                    release_lock(key, id)
+                return False, "Could not acquire all required locks"
+
+        try:
+            # Phase 2: Execute the wrapped function to perform operations
+            result = func(items, *args, **kwargs)
+            return result
+        finally:
+            for lock_key, lock_id in acquired_locks.items():
+                release_lock(lock_key, lock_id)
+
+    return wrapper
+
+
+def release_lock(lock_key, lock_id):
+    """Release a Redis lock using Lua script for atomicity"""
+    script = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('del', KEYS[1])
+    else
+        return 0
+    end
+    """
+    return db.eval(script, 1, lock_key, lock_id)
 
 
 
@@ -161,7 +220,7 @@ def remove_stock(item_id: str, amount: int):
     lock_id = str(uuid.uuid4())
 
     # Try to acquire lock
-    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=10)
+    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=50)
     if not lock_acquired:
         return abort(409, f"Item {item_id} is currently being modified by another process")
 
@@ -175,7 +234,6 @@ def remove_stock(item_id: str, amount: int):
 
         # Reserve the stock rather than immediately subtracting
         item_entry.reserved += amount
-        app.logger.info(f"Item: {item_id} stock reserved: {item_entry.reserved}")
 
         try:
             db.set(item_id, msgpack.encode(item_entry))
@@ -197,128 +255,139 @@ def remove_stock(item_id: str, amount: int):
         db.eval(script, 1, lock_key, lock_id)
 
 
-def make_reservation(item_id, amount):
-    lock_key = f"lock:stock:{item_id}"
-    lock_id = str(uuid.uuid4())
+@two_phase_locking
+def make_reservations(items):
+    """
+    Make reservations for multiple items in a batch.
+    Each item should be a dict with 'item_id' and 'amount' keys.
+    """
+    success = True
+    failed_items = []
 
-    # Get Lock
-    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=10)
-    if not lock_acquired:
-        app.logger.error(f"Could not acquire lock for item {item_id}")
-        return False
+    for item in items:
+        item_id = item.get('item_id')
+        amount = item.get('amount')
 
-    try:
-        item_entry = get_item_from_db(item_id)
+        if not (item_id and amount):
+            continue
 
-        # Check stock availability
-        if item_entry.stock - item_entry.reserved < amount:
-            app.logger.error(f"Not enough stock for item {item_id}: requested {amount}, available {item_entry.stock - item_entry.reserved}")
-            return False
+        try:
+            amount = int(amount)
+            item_entry = get_item_from_db(item_id)
 
-        # Reserve the stock
-        item_entry.reserved += amount
-        db.set(item_id, msgpack.encode(item_entry))
-        app.logger.info(f"Reserved {amount} units of item {item_id}")
-        return True
+            # Check stock availability
+            if item_entry.stock - item_entry.reserved < amount:
+                failed_items.append(item_id)
+                success = False
+                break
 
-    finally:
-        # Release the lock
-        script = """
-                    if redis.call('get', KEYS[1]) == ARGV[1] then
-                        return redis.call('del', KEYS[1])
-                    else
-                        return 0
-                    end
-                 """
-        db.eval(script, 1, lock_key, lock_id)
+            # Reserve the stock
+            item_entry.reserved += amount
 
-def release_reservation(item_id, amount):
-    """Release a previously made reservation"""
-    lock_key = f"lock:stock:{item_id}"
-    lock_id = str(uuid.uuid4())
+            try:
+                db.set(item_id, msgpack.encode(item_entry))
+            except redis.exceptions.RedisError as e:
+                app.logger.error(f"DB error when making reservation: {e}")
+                failed_items.append(item_id)
+                success = False
+                break
 
-    # Try to acquire lock
-    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=10)
-    if not lock_acquired:
-        app.logger.error(f"Could not acquire lock for releasing reservation on item {item_id}")
-        return False
+        except Exception as e:
+            app.logger.error(f"Error processing reservation for item {item_id}: {e}")
+            failed_items.append(item_id)
+            success = False
+            break
 
-    try:
-        item_entry: StockValue = get_item_from_db(item_id)
-        amount = int(amount)
+    message = "All reservations completed successfully" if success else f"Failed to reserve items: {', '.join(failed_items)}"
+    return success, message
 
-        if item_entry.reserved < amount:
-            app.logger.warning(f"Attempting to release more than is reserved for item {item_id}")
-            item_entry.reserved = 0
-        else:
+
+@two_phase_locking
+def release_reservations(items):
+    """
+    Release reservations for multiple items in a batch.
+    Each item should be a dict with 'item_id' and 'amount' keys.
+    """
+    success = True
+    failed_items = []
+
+    for item in items:
+        item_id = item.get('item_id')
+        amount = item.get('amount')
+
+        if not (item_id and amount):
+            continue
+
+        try:
+            amount = int(amount)
+            item_entry = get_item_from_db(item_id)
+
+            if item_entry.reserved < amount:
+                item_entry.reserved = 0
+            else:
+                item_entry.reserved -= amount
+
+            try:
+                db.set(item_id, msgpack.encode(item_entry))
+            except redis.exceptions.RedisError as e:
+                app.logger.error(f"DB error when releasing reservation: {e}")
+                failed_items.append(item_id)
+                success = False
+                break
+
+        except Exception as e:
+            app.logger.error(f"Error processing reservation release for item {item_id}: {e}")
+            failed_items.append(item_id)
+            success = False
+            break
+
+    message = "All reservations released successfully" if success else f"Failed to release reservations for items: {', '.join(failed_items)}"
+    return success, message
+
+
+@two_phase_locking
+def confirm_reservations(items):
+    """Confirm reservations for multiple items in a single transaction"""
+    success = True
+
+    for item in items:
+        item_id = item.get('item_id')
+        amount = item.get('amount')
+
+        if not (item_id and amount):
+            continue
+
+        try:
+            item_entry = get_item_from_db(item_id)
+            amount = int(amount)
+
+            if item_entry.reserved < amount:
+                app.logger.error(f"Not enough reserved stock for item {item_id}")
+                success = False
+                break
+
+            # Actually subtract from stock and reduce reservation
+            item_entry.stock -= amount
             item_entry.reserved -= amount
 
-        try:
-            db.set(item_id, msgpack.encode(item_entry))
-            app.logger.info(f"Released reservation for item {item_id}, amount {amount}")
-            return True
+            try:
+                db.set(item_id, msgpack.encode(item_entry))
+            except redis.exceptions.RedisError as e:
+                app.logger.error(f"DB error when confirming reservation: {e}")
+                success = False
+                break
+        except Exception as e:
+            app.logger.error(f"Error processing item {item_id}: {e}")
+            success = False
+            break
 
-        except redis.exceptions.RedisError as e:
-            app.logger.error(f"DB error when releasing reservation: {e}")
-            return False
-    finally:
-        # Release lock
-        script = """
-        if redis.call('get', KEYS[1]) == ARGV[1] then
-            return redis.call('del', KEYS[1])
-        else
-            return 0
-        end
-        """
-        db.eval(script, 1, lock_key, lock_id)
-
-def confirm_reservation(item_id, amount):
-    """Confirm a reservation by actually reducing the stock"""
-    lock_key = f"lock:stock:{item_id}"
-    lock_id = str(uuid.uuid4())
-
-    # Try to acquire lock
-    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=10)
-    if not lock_acquired:
-        app.logger.error(f"Could not acquire lock for confirming reservation on item {item_id}")
-        return False
-
-    try:
-        item_entry: StockValue = get_item_from_db(item_id)
-        amount = int(amount)
-
-        if item_entry.reserved < amount:
-            app.logger.error(f"Not enough reserved stock for item {item_id}")
-            return False
-
-        # Actually subtract from stock and reduce reservation
-        item_entry.stock -= amount
-        item_entry.reserved -= amount
-
-        try:
-            db.set(item_id, msgpack.encode(item_entry))
-            app.logger.info(f"Confirmed reservation for item {item_id}, reduced stock by {amount}")
-            return True
-        except redis.exceptions.RedisError as e:
-            app.logger.error(f"DB error when confirming reservation: {e}")
-            return False
-    finally:
-        # Release lock
-        script = """
-        if redis.call('get', KEYS[1]) == ARGV[1] then
-            return redis.call('del', KEYS[1])
-        else
-            return 0
-        end
-        """
-        db.eval(script, 1, lock_key, lock_id)
+    return success, "Stock reservations processed successfully" if success else "Failed to process reservations"
 
 
 def process_order_events():
     """Process events from the order stream"""
     consumer_name = f"stock-consumer-{uuid.uuid4()}"
     ensure_consumer_group(ORDER_EVENTS, STOCK_ORDER_GROUP)
-    app.logger.info(f"Starting order events consumer {consumer_name}")
 
     while True:
         try:
@@ -340,8 +409,6 @@ def process_order_events():
                         event_type = event.get('type')
                         event_data = event.get('data', {})
 
-                        app.logger.info(f"Processing order event: {event_type}")
-
                         if event_type == ORDER_CREATED:
                             transaction_id = event_data.get('transaction_id')
                             order_id = event_data.get('order_id')
@@ -350,36 +417,16 @@ def process_order_events():
                             user_id = event_data.get('user_id')
                             response_stream = event_data.get('response_stream')
 
-                            app.logger.info(f"Trying to reserve stock for order {order_id}")
-
-                            reserved_items = []
-                            reservation_success = []
-
                             # Try to reserve
-                            for item in items:
-                                item_id = item.get('item_id')
-                                amount = int(item.get('amount'))
-                                try:
-                                    res = make_reservation(item_id, amount)
-                                    reservation_success.append(res)
-                                    if reservation_success[-1]:
-                                        reserved_items.append((item_id, amount))
-                                except Exception as e:
-                                    app.logger.error(f"Error reserving item {item_id}: {e}")
-                                    reservation_success[-1] = False
-                                    break
+                            success, message = make_reservations(items)
 
-                            # If any reservation failed, roll back all successful reservations
-                            if not all(reservation_success):
-                                app.logger.warning(f"Rolling back reservations for order {order_id}")
-                                for item_id, amount in reserved_items:
-                                    try:
-                                        release_reservation(item_id, amount)
-                                    except Exception as e:
-                                        app.logger.error(f"Error rolling back reservation for item {item_id}: {e}")
-                                add_to_response_stream(response_stream, order_id, "failed", "FAILED_TO_RESERVE")
+                            if not success:
+                                success_release, message_release = release_reservations(items)
+                                if not success_release:
+                                    app.logger.error(f"Failed to release reservation")
+                                add_to_response_stream(response_stream, order_id, "failed", message_release)
+
                             else:
-                                app.logger.info(f"Successfully reserved all items for order {order_id}")
                                 publish_event(STOCK_EVENTS, STOCK_RESERVED, {
                                     "order_id": order_id,
                                     "transaction_id": transaction_id,
@@ -404,7 +451,6 @@ def process_payment_events():
     """Process events from the payment stream"""
     consumer_name = f"stock-payment-consumer-{uuid.uuid4()}"
     ensure_consumer_group(PAYMENT_EVENTS, STOCK_PAYMENT_GROUP)
-    app.logger.info(f"Starting payment events consumer {consumer_name}")
 
     while True:
         try:
@@ -426,57 +472,40 @@ def process_payment_events():
                         event_type = event.get('type')
                         event_data = event.get('data', {})
 
-                        app.logger.info(f"Processing payment event: {event_type}")
-
                         if event_type == PAYMENT_FAILED:
                             order_id = event_data.get('order_id')
                             items = event_data.get('items', [])
                             response_stream = event_data.get('response_stream')
-                            reason = "PAYMENT_FAILED"
 
-                            app.logger.info(f"Payment failed for order {order_id}, releasing stock")
-                            for item in items:
-                                item_id = item.get('item_id')
-                                amount = item.get('amount')
 
-                                if item_id and amount:
-                                    success = release_reservation(item_id, amount)
-                                    if not success:
-                                        reason = f"Failed to release reservation for item {item_id}"
-                                        app.logger.error(reason)
+                            success, message = release_reservations(items)
 
-                            add_to_response_stream(response_stream, order_id,"failed", reason)
+                            if not success:
+                                app.logger.error(f"Error releasing a reservation")
+                            add_to_response_stream(response_stream, order_id, "failed", message)
 
                         elif event_type == PAYMENT_SUCCEEDED:
                             transaction_id = event_data.get('transaction_id')
                             order_id = event_data.get('order_id')
                             items = event_data.get('items', [])
                             response_stream = event_data.get('response_stream')
+                            total_cost = event_data.get('total_cost') ,
+                            user_id = event_data.get('user_id')
 
-                            app.logger.info(f"Payment succeeded transaction {transaction_id} for order {order_id} -> confirming stock reduction")
+                            success, message = confirm_reservations(items)
 
-                            subtraction_success = []
-
-                            for item in items:
-                                item_id = item.get('item_id')
-                                amount = item.get('amount')
-
-                                if item_id and amount:
-                                    res = confirm_reservation(item_id, amount)
-                                    subtraction_success.append(res)
-                                    if not subtraction_success[-1]:
-                                        # TODO MAKE SURE PAYMENT ALSO IS REVERTED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                                        app.logger.error(f"Failed to confirm reservation for item {item_id} but PAYMENT was SUCCESS")
-
-                            if all(subtraction_success):
+                            if success:
                                 reason = "Stock reservation OK, payment OK, stock confirmation OK"
-                                app.logger.info(f"Successfully confirmed reservation")
                                 add_to_response_stream(response_stream, order_id, "success", reason)
                             else:
-                                reason = f"Failed to confirm reservation but PAYMENT was SUCCESS"
-                                app.logger.error(reason)
-                                add_to_response_stream(response_stream, order_id, "failed", reason)
-
+                                publish_event(STOCK_EVENTS, STOCK_SUBTRACTION_FAILED, {
+                                    "order_id": order_id,
+                                    "transaction_id": transaction_id,
+                                    "total_cost": total_cost,
+                                    "user_id": user_id,
+                                    "items": items,
+                                    "response_stream": response_stream,
+                                })
                         db.xack(stream_name, STOCK_PAYMENT_GROUP, message_id)
 
                     except Exception as e:
@@ -499,8 +528,6 @@ def start_consumers():
 
     order_consumer_thread.start()
     payment_consumer_thread.start()
-
-    app.logger.info("Event consumers started")
 
 
 def initialize_app():

@@ -18,6 +18,7 @@ STOCK_EVENTS = "stock:events"
 PAYMENT_EVENTS = "payment:events"
 
 # Event types
+STOCK_SUBTRACTION_FAILED = "stock.subtraction.failed"  # we consume
 STOCK_RESERVED = "stock.reserved" # we consume
 PAYMENT_SUCCEEDED = "payment.succeeded" # we post
 PAYMENT_FAILED = "payment.failed" # we post
@@ -56,20 +57,26 @@ def publish_event(stream, event_type, data):
     }
     try:
         event_db.xadd(stream, {b'event': json.dumps(event).encode()})
-        app.logger.info(f"Published event {event_type} to {stream}")
         return event
     except Exception as e:
         app.logger.error(f"Failed to publish event: {e}")
         return None
 
+def add_to_response_stream(response_stream, order_id, status, reason=None):
+    event_db.xadd(response_stream, {
+        b'result': json.dumps({
+            "status": status,
+            "reason": reason,
+            "order_id": order_id,
+        }).encode()
+    })
+
 def ensure_consumer_group(stream, group):
     """Create a consumer group if it doesn't exist"""
     try:
         event_db.xgroup_create(stream, group, id='0-0', mkstream=True)
-        app.logger.info(f"Created consumer group {group} for stream {stream}")
     except redis.exceptions.ResponseError as e:
         if 'BUSYGROUP' in str(e):  # Group already exists
-            app.logger.debug(f"Consumer group {group} already exists for stream {stream}")
             pass
         else:
             app.logger.error(f"Error creating consumer group: {e}")
@@ -176,7 +183,6 @@ def remove_credit( user_id: str, amount: int):
 
 
 def remove_credit_async( user_id: str, amount: int):
-    app.logger.debug(f"Removing {amount} credit from user: {user_id}")
 
     # Acquire lock for user
     lock_key = f"lock:user:{user_id}"
@@ -185,6 +191,7 @@ def remove_credit_async( user_id: str, amount: int):
     # Try to acquire lock
     lock_acquired = db.set(lock_key, lock_id, nx=True, ex=10)
     if not lock_acquired:
+        app.logger.error(f"Could not acquire lock for user {user_id}")
         return False
 
     try:
@@ -216,12 +223,45 @@ def remove_credit_async( user_id: str, amount: int):
         """
         db.eval(script, 1, lock_key, lock_id)
 
+def add_credit_async( user_id: str, amount: int):
+
+    # Acquire lock for user
+    lock_key = f"lock:user:{user_id}"
+    lock_id = str(uuid.uuid4())
+
+    # Try to acquire lock
+    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=10)
+    if not lock_acquired:
+        app.logger.error(f"Could not acquire lock for user {user_id}")
+        return False
+
+    try:
+        user_entry: UserValue = get_user_from_db(user_id)
+        user_entry.credit += int(amount)
+        try:
+            pipe = db.pipeline(transaction=True)
+            pipe.set(user_id, msgpack.encode(user_entry))
+            pipe.execute()
+            return True
+
+        except redis.exceptions.RedisError:
+            return False
+    finally:
+        # Release lock
+        script = """
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+            return redis.call('del', KEYS[1])
+        else
+            return 0
+        end
+        """
+        db.eval(script, 1, lock_key, lock_id)
+
 
 def process_stock_events():
     """Process events from the stock stream"""
     consumer_name = f"payment-consumer-{uuid.uuid4()}"
     ensure_consumer_group(STOCK_EVENTS, PAYMENT_STOCK_GROUP)
-    app.logger.info(f"Starting stock events consumer {consumer_name}")
 
     while True:
         try:
@@ -239,32 +279,27 @@ def process_stock_events():
             for stream_name, stream_messages in messages:
                 for message_id, message in stream_messages:
                     event = json.loads(message[b'event'].decode())
+                    event_type = event.get('type')
+                    event_data = event.get('data', {})
 
                     try:
-                        event_type = event.get('type')
-                        event_data = event.get('data', {})
-
-                        app.logger.debug(f"Processing stock event: {event_type}")
-
                         if event_type == STOCK_RESERVED:
-                            # Extract payment details from the event
                             transaction_id = event_data.get('transaction_id')
                             order_id = event_data.get('order_id')
                             user_id = event_data.get('user_id')
-                            total_amount = event_data.get('total_cost')
+                            total_cost = event_data.get('total_cost')
                             items = event_data.get('items', [])
                             response_stream= event_data.get('response_stream')
 
-                            app.logger.info(f"Processing payment for order {order_id}, amount {total_amount}")
-
                             try:
-                                payment_result = remove_credit_async(user_id, total_amount)
+                                payment_result = remove_credit_async(user_id, int(total_cost))
                                 if not payment_result:
                                     publish_event(PAYMENT_EVENTS, PAYMENT_FAILED, {
                                         "order_id": order_id,
                                         "user_id": user_id,
                                         "transaction_id": transaction_id,
                                         "items": items,
+                                        "total_cost": total_cost,
                                         "response_stream": response_stream
                                     })
                                 else:
@@ -274,45 +309,53 @@ def process_stock_events():
                                         "transaction_id": transaction_id,
                                         "order_id": order_id,
                                         "items": items,
+                                        "total_cost": total_cost,
                                         "response_stream": response_stream
                                     })
 
+                            except Exception as e:
+                                reason = f"Error processing payment: {e}"
+                                add_to_response_stream(response_stream, order_id, "failed", reason)
+                        elif event_type == STOCK_SUBTRACTION_FAILED:
+                            order_id = event_data.get('order_id')
+                            user_id = event_data.get('user_id')
+                            total_cost = event_data.get('total_cost')
+                            response_stream = event_data.get('response_stream')
 
-                                app.logger.info(f"Payment processing result: {payment_result}")
+                            try:
+                                rollback_result = add_credit_async(user_id, int(total_cost))
+                                if rollback_result:
+                                    reason = "Payment rollback success!"
+                                    add_to_response_stream(response_stream, order_id, "success", reason)
+                                else:
+                                    reason = "Payment rollback failed!"
+                                    # app.logger.error(f"{reason}")
+                                    add_to_response_stream(response_stream, order_id, "failed", reason)
 
                             except Exception as e:
-                                app.logger.error(f"Error processing payment: {e}")
-                                publish_event(PAYMENT_EVENTS, PAYMENT_FAILED, {
-                                    "order_id": order_id,
-                                    "transaction_id": transaction_id,
-                                    "user_id": user_id,
-                                    "amount": total_amount,
-                                    "items": items,
-                                    "response_stream": response_stream
-                                })
+                                reason = f"Error rolling back payment: {e}"
+                                # app.logger.error(f"{reason}")
+                                add_to_response_stream(response_stream, order_id, "failed", reason)
+
                         # Acknowledge the message
                         db.xack(stream_name, PAYMENT_STOCK_GROUP, message_id)
-
                     except Exception as e:
-                        app.logger.error(f"Error processing stock event {message_id}: {e}")
-                        # Message will be reprocessed later if not acknowledged
+                        app.logger.error(f"Error processing stock event {event_type}: {e}")
 
         except Exception as e:
             app.logger.error(f"Error in stock events consumer: {e}")
-            time.sleep(1)
+            time.sleep(0.1)
 
 
 def start_consumers():
     """Start background threads for event processing"""
     stock_consumer_thread = threading.Thread(target=process_stock_events, daemon=True)
     stock_consumer_thread.start()
-    app.logger.info("Event consumers started")
 
 
 def initialize_streams():
     """Initialize Redis Streams and consumer groups"""
     ensure_consumer_group(PAYMENT_EVENTS, "init-group")
-    app.logger.info("Payment events stream initialized")
 
 
 def initialize_app():
