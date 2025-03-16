@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import atexit
@@ -140,8 +141,9 @@ def remove_stock(item_id: str, amount: int):
     return Response(f"Item: {item_id} stock updated to: ", status=200) #{item_entry.stock}
 
 def produce_stock_event(order_entry: OrderValue, event_type: str):
-    order_entry.event_type = event_type
-    producer.produce('stock', key=order_entry.order_id, value=msgpack.encode(order_entry))
+    new_order_entry = copy.deepcopy(order_entry)
+    new_order_entry.event_type = event_type
+    producer.produce('stock', key=new_order_entry.order_id, value=msgpack.encode(new_order_entry))
     producer.flush()
 
 def consumer_executor(consumer: Consumer, execution_function):

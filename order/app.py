@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import atexit
@@ -154,8 +155,9 @@ def produce_order_event(order_entry: OrderValue, order_id: str, event_id: str):
     producer.flush()
 
 def produce_result(order_entry: OrderDto, event_type: str):
-    order_entry.event_type = event_type
-    event_db.xadd(order_entry.event_id, { b'result': msgpack.encode(order_entry) })
+    new_order_entry = copy.deepcopy(order_entry)
+    new_order_entry.event_type = event_type
+    event_db.xadd(new_order_entry.event_id, { b'result': msgpack.encode(new_order_entry) })
     # event_db.publish(order_entry.event_id, msgpack.encode(order_entry))
 
 @app.post('/checkout/<order_id>')

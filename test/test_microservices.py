@@ -2,7 +2,8 @@ import unittest
 
 import utils as tu
 
-
+# docker-compose build --no-cache
+# docker-compose up -d
 class TestMicroservices(unittest.TestCase):
 
     def test_stock(self):

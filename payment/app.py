@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import atexit
@@ -134,8 +135,9 @@ def remove_credit(user_id: str, amount: int):
     return Response(f"User: {user_id} credit updated to: ", status=200) #{user_entry.credit}
 
 def produce_payment_event(order_entry: OrderValue, event_type: str):
-    order_entry.event_type = event_type
-    producer.produce('payment', key=order_entry.order_id, value=msgpack.encode(order_entry))
+    new_order_entry = copy.deepcopy(order_entry)
+    new_order_entry.event_type = event_type
+    producer.produce('payment', key=new_order_entry.order_id, value=msgpack.encode(new_order_entry))
     producer.flush()
 
 def consumer_executor(consumer: Consumer, execution_function):
@@ -163,6 +165,8 @@ def start_stock_consumer():
 
     def execute_function(msg):
         order_entry = msgpack.decode(msg.value(), type=OrderValue)
+        if order_entry.event_type != 'SUCCESS':
+            return
         app.logger.info(f"Processing stock event: {order_entry.event_type}")
         logs_id = f"logs{order_entry.event_id}"
         user_id = order_entry.user_id
