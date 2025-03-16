@@ -6,10 +6,12 @@ import json
 import time
 import threading
 
+
 import redis
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+from functools import wraps
 
 DB_ERROR_STR = "DB error"
 
@@ -83,6 +85,56 @@ def ensure_consumer_group(stream, group):
             raise
 
 
+def release_lock(lock_key, lock_id):
+    """Release a Redis lock using Lua script for atomicity"""
+    script = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('del', KEYS[1])
+    else
+        return 0
+    end
+    """
+    return db.eval(script, 1, lock_key, lock_id)
+
+
+def user_locking(func):
+    """
+    Decorator that implements locking for user payment operations.
+    Similar to two_phase_locking but optimized for single user operations.
+    """
+
+    @wraps(func)
+    def wrapper(user_id, amount, *args, **kwargs):
+        lock_key = f"lock:user:{user_id}"
+        lock_id = str(uuid.uuid4())
+        lock_timeout = 30
+        retry_count = 5
+        lock_acquired = False
+
+        # Try to acquire lock with retries
+        for attempt in range(retry_count):
+            lock_acquired = db.set(lock_key, lock_id, nx=True, ex=lock_timeout)
+            if lock_acquired:
+                break
+
+            if attempt < retry_count - 1:
+                backoff = min(0.1 * (2 ** attempt), 1.0)
+                time.sleep(backoff)
+
+        if not lock_acquired:
+            app.logger.error(f"Could not acquire lock for user {user_id} after {retry_count} attempts")
+            return False
+
+        try:
+            result = func(user_id, amount, *args, **kwargs)
+            return result
+        finally:
+            release_lock(lock_key, lock_id)
+
+    return wrapper
+
+
+
 def get_user_from_db(user_id: str) -> UserValue | None:
     try:
         # get serialized data
@@ -142,60 +194,29 @@ def add_credit(user_id: str, amount: int):
 
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit( user_id: str, amount: int):
+    user_entry: UserValue = get_user_from_db(user_id)
+    amount = int(amount)
 
-    # Acquire lock for user
-    lock_key = f"lock:user:{user_id}"
-    lock_id = str(uuid.uuid4())
+    if user_entry.credit < amount:
+        return abort(400, f"User: {user_id} does not have enough credit (has {user_entry.credit}, needs {amount})!")
 
-    # Try to acquire lock
-    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=10)
-    if not lock_acquired:
-        return abort(400, f"User {user_id} is currently being modified by another process")
+    user_entry.credit -= amount
 
     try:
-        user_entry: UserValue = get_user_from_db(user_id)
-        amount = int(amount)
+        pipe = db.pipeline(transaction=True)
+        pipe.set(user_id, msgpack.encode(user_entry))
+        pipe.execute()
+        return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
-        if user_entry.credit < amount:
-            return abort(400, f"User: {user_id} does not have enough credit (has {user_entry.credit}, needs {amount})!")
-
-        # Update credit
-        user_entry.credit -= amount
-
-        try:
-            pipe = db.pipeline(transaction=True)
-            pipe.set(user_id, msgpack.encode(user_entry))
-            pipe.execute()
-            return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
-
-        except redis.exceptions.RedisError:
-            return abort(400, DB_ERROR_STR)
-    finally:
-        # Release lock
-        script = """
-        if redis.call('get', KEYS[1]) == ARGV[1] then
-            return redis.call('del', KEYS[1])
-        else
-            return 0
-        end
-        """
-        db.eval(script, 1, lock_key, lock_id)
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
 
 
-def remove_credit_async( user_id: str, amount: int):
-
-    # Acquire lock for user
-    lock_key = f"lock:user:{user_id}"
-    lock_id = str(uuid.uuid4())
-
-    # Try to acquire lock
-    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=10)
-    if not lock_acquired:
-        app.logger.error(f"Could not acquire lock for user {user_id}")
-        return False
-
+@user_locking
+def remove_credit_async(user_id, amount):
+    """Remove credit from a user with locking handled by decorator"""
     try:
-        user_entry: UserValue = get_user_from_db(user_id)
+        user_entry = get_user_from_db(user_id)
         amount = int(amount)
 
         if user_entry.credit < amount:
@@ -209,53 +230,37 @@ def remove_credit_async( user_id: str, amount: int):
             pipe.set(user_id, msgpack.encode(user_entry))
             pipe.execute()
             return True
-
-        except redis.exceptions.RedisError:
+        except redis.exceptions.RedisError as e:
+            app.logger.error(f"DB error when removing credit: {e}")
             return False
-    finally:
-        # Release lock
-        script = """
-        if redis.call('get', KEYS[1]) == ARGV[1] then
-            return redis.call('del', KEYS[1])
-        else
-            return 0
-        end
-        """
-        db.eval(script, 1, lock_key, lock_id)
-
-def add_credit_async( user_id: str, amount: int):
-
-    # Acquire lock for user
-    lock_key = f"lock:user:{user_id}"
-    lock_id = str(uuid.uuid4())
-
-    # Try to acquire lock
-    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=10)
-    if not lock_acquired:
-        app.logger.error(f"Could not acquire lock for user {user_id}")
+    except Exception as e:
+        app.logger.error(f"Error removing credit for user {user_id}: {e}")
         return False
 
+
+@user_locking
+def add_credit_async(user_id, amount):
+    """Add credit to a user with locking handled by decorator"""
     try:
-        user_entry: UserValue = get_user_from_db(user_id)
-        user_entry.credit += int(amount)
+        user_entry = get_user_from_db(user_id)
+
+        if isinstance(amount, list):
+            amount = sum(amount)
+        amount = int(amount)
+
+        user_entry.credit += amount
+
         try:
             pipe = db.pipeline(transaction=True)
             pipe.set(user_id, msgpack.encode(user_entry))
             pipe.execute()
             return True
-
-        except redis.exceptions.RedisError:
+        except redis.exceptions.RedisError as e:
+            app.logger.error(f"DB error when adding credit: {e}")
             return False
-    finally:
-        # Release lock
-        script = """
-        if redis.call('get', KEYS[1]) == ARGV[1] then
-            return redis.call('del', KEYS[1])
-        else
-            return 0
-        end
-        """
-        db.eval(script, 1, lock_key, lock_id)
+    except Exception as e:
+        app.logger.error(f"Error adding credit for user {user_id}: {e}")
+        return False
 
 
 def process_stock_events():
@@ -271,6 +276,7 @@ def process_stock_events():
                 consumer_name,
                 {STOCK_EVENTS: '>'},
                 count=1,
+                block=5000
             )
 
             if not messages:
@@ -316,6 +322,8 @@ def process_stock_events():
                             except Exception as e:
                                 reason = f"Error processing payment: {e}"
                                 add_to_response_stream(response_stream, order_id, "failed", reason)
+
+
                         elif event_type == STOCK_SUBTRACTION_FAILED:
                             order_id = event_data.get('order_id')
                             user_id = event_data.get('user_id')
@@ -323,18 +331,16 @@ def process_stock_events():
                             response_stream = event_data.get('response_stream')
 
                             try:
-                                rollback_result = add_credit_async(user_id, int(total_cost))
+                                rollback_result = add_credit_async(user_id, sum(total_cost))
                                 if rollback_result:
                                     reason = "Payment rollback success!"
-                                    add_to_response_stream(response_stream, order_id, "success", reason)
                                 else:
                                     reason = "Payment rollback failed!"
-                                    # app.logger.error(f"{reason}")
-                                    add_to_response_stream(response_stream, order_id, "failed", reason)
+                                add_to_response_stream(response_stream, order_id, "failed", reason)
 
                             except Exception as e:
                                 reason = f"Error rolling back payment: {e}"
-                                # app.logger.error(f"{reason}")
+                                app.logger.error(reason)
                                 add_to_response_stream(response_stream, order_id, "failed", reason)
 
                         # Acknowledge the message

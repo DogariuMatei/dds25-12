@@ -100,8 +100,8 @@ def two_phase_locking(func):
     @wraps(func)
     def wrapper(items, *args, **kwargs):
         acquired_locks = {}
-        lock_timeout = 1000000
-        retry_count = 100
+        lock_timeout = 30
+        retry_count = 3
 
         # Acquire all locks
         for item in items:
@@ -362,7 +362,6 @@ def confirm_reservations(items):
             amount = int(amount)
 
             if item_entry.reserved < amount:
-                app.logger.error(f"Not enough reserved stock for item")
                 success = False
                 break
 
@@ -395,7 +394,8 @@ def process_order_events():
                 STOCK_ORDER_GROUP,
                 consumer_name,
                 {ORDER_EVENTS: '>'},
-                count=1
+                count=1,
+                block=5000
             )
 
             if not message:
@@ -458,7 +458,8 @@ def process_payment_events():
                 STOCK_PAYMENT_GROUP,
                 consumer_name,
                 {PAYMENT_EVENTS: '>'},
-                count=1
+                count=1,
+                block=5000
             )
 
             if not messages:
@@ -485,11 +486,10 @@ def process_payment_events():
                             add_to_response_stream(response_stream, order_id, "failed", message)
 
                         elif event_type == PAYMENT_SUCCEEDED:
-                            transaction_id = event_data.get('transaction_id')
                             order_id = event_data.get('order_id')
                             items = event_data.get('items', [])
                             response_stream = event_data.get('response_stream')
-                            total_cost = event_data.get('total_cost') ,
+                            total_cost = event_data.get('total_cost'),
                             user_id = event_data.get('user_id')
 
                             success, message = confirm_reservations(items)
@@ -500,10 +500,8 @@ def process_payment_events():
                             else:
                                 publish_event(STOCK_EVENTS, STOCK_SUBTRACTION_FAILED, {
                                     "order_id": order_id,
-                                    "transaction_id": transaction_id,
                                     "total_cost": total_cost,
                                     "user_id": user_id,
-                                    "items": items,
                                     "response_stream": response_stream,
                                 })
                         db.xack(stream_name, STOCK_PAYMENT_GROUP, message_id)
