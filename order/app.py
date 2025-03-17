@@ -115,7 +115,7 @@ def send_post_request(url: str, json_data=None):
 
 def send_get_request(url: str):
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=5)
     except requests.exceptions.RequestException:
         abort(400, REQ_ERROR_STR)
     else:
@@ -159,12 +159,30 @@ def checkout(order_id: str):
     orchestrator_reply = send_post_request(f"{GATEWAY_URL}/orchestrator/receive", request_data)
     if orchestrator_reply.status_code != 200:
         return abort(400, orchestrator_reply.text)
-    try:
-        db.set(order_id, msgpack.encode(order_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    app.logger.debug("Checkout successful")
-    return Response("Checkout successful", status=200)
+
+    # POLLING
+    timeout = 10
+    interval = 2
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        response = send_get_request(f"{GATEWAY_URL}/orchestrator/status/{order_id}")
+        if response.status_code == 200:
+            status_data = response.json()
+            order_status = status_data.get("order_status")
+            order_error = status_data.get("order_error")
+
+            if order_status == "COMPLETED":
+                order_entry.paid = True
+                try:
+                    db.set(order_id, msgpack.encode(order_entry))
+                except redis.exceptions.RedisError:
+                    return abort(400, DB_ERROR_STR)
+                app.logger.debug("Checkout successful")
+                return Response("Checkout successful", status=200)
+            elif order_status == "CANCELLED":
+                return abort(400, order_error)
+        time.sleep(interval)
 
 
 if __name__ == '__main__':

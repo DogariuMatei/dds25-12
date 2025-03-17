@@ -101,6 +101,8 @@ def process_order():
     if not items:
         return abort(400, "STOCK ERROR: No items provided when processing order")
 
+    logger_q = []
+
     pipe = db.pipeline()
     try:
         for item in items:
@@ -114,8 +116,11 @@ def process_order():
             item_id = item["item_id"]
             item_entry: StockValue = get_item_from_db(item_id)
             item_entry.stock -= item["quantity"]
+            logger_q.append(f"Item: {item_id} stock updated to: {item_entry.stock}")
             pipe.set(item_id, msgpack.encode(item_entry))
         pipe.execute()
+        for item in logger_q:
+            app.logger.debug(item)
         return Response(f"Order: {order_id} successfully processed", status=200)
     except redis.exceptions.WatchError:
         return abort(400, "STOCK ERROR: Stock changed during *PROCESS ORDER* transaction, please retry")

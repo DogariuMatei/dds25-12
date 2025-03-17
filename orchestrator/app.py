@@ -46,6 +46,21 @@ class Order(Struct):
     items: list
     paid: bool = False
     status: str
+    error: str = None
+
+
+def get_item_from_db(order_id: str) -> Order | None:
+    # get serialized data
+    try:
+        entry: bytes = db.get(order_id)
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    # deserialize data if it exists else return null
+    entry: Order | None = msgpack.decode(entry, type=Order) if entry else None
+    if entry is None:
+        # if item does not exist in the database; abort
+        abort(400, f"Order: {order_id} not found!")
+    return entry
 
 
 def send_post_request(url: str, json_data=None):
@@ -56,8 +71,31 @@ def send_post_request(url: str, json_data=None):
     else:
         return response
 
-def process_order():
-    return
+
+def process_order(order_id: str):
+    order: Order = get_item_from_db(order_id)
+
+    stock_request = {
+        "order_id": order.order_id,
+        "items": [{"item_id": item["item_id"], "quantity": item["quantity"]} for item in order.items]
+    }
+    stock_reply = send_post_request(f"{GATEWAY_URL}/stock/process", stock_request)
+    if stock_reply.status_code != 200:
+        order.status = "CANCELLED"
+        order.error = stock_reply.text
+
+    # Step 2: Process payment
+    payment_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order.user_id}/{order.total_cost}")
+    if payment_reply.status_code != 200:
+        send_post_request(f"{GATEWAY_URL}/stock/cancel", stock_request)
+        order.status = "CANCELLED"
+        order.error = payment_reply.text
+
+    # Successful
+    if order.status != "CANCELLED":
+        order.paid = True
+        order.status = "COMPLETED"
+
 
 @app.post('/receive')
 def receive_order():
@@ -66,24 +104,22 @@ def receive_order():
     order_id = request_data.get("order_id")
     total_cost = request_data.get("total_cost")
     items = request_data.get("items")
-    # add to log
-    order = Order(order_id, user_id, total_cost, items, False, "RECEIVED")
 
-    stock_request = {
-        "order_id": order.order_id,
-        "items": [{"item_id": item["item_id"], "quantity": item["quantity"]} for item in items]
-    }
-    stock_reply = send_post_request(f"{GATEWAY_URL}/stock/process", stock_request)
-    if stock_reply.status_code != 200:
-        return Response(stock_reply.text, status=400)
-    # Step 2: Process payment
-    payment_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order.user_id}/{order.total_cost}")
-    if payment_reply.status_code != 200:
-        send_post_request(f"{GATEWAY_URL}/stock/cancel", stock_request)
-        return Response(payment_reply.text, status=400)
-    # Successful
-    order.paid = True
-    return Response("Checkout successful", status=200)
+    value = msgpack.encode(Order(order_id, user_id, total_cost, items, False, "QUEUED"))
+    try:
+        db.set(order_id, value)
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+
+    queue.enqueue(process_order, order_id)
+    return Response("Order successfully queued", status=200)
+
+
+@app.get('/status/<order_id>')
+def order_status(order_id: str):
+    order: Order = get_item_from_db(order_id)
+    return jsonify({'order_status': order.status, 'order_error': order.error})
+
 
 
 if __name__ == '__main__':
