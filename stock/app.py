@@ -99,7 +99,7 @@ def process_order():
     items = request_data.get("items", [])
 
     if not items:
-        return abort(400, "insufficient stock")
+        return abort(400, "STOCK ERROR: No items provided when processing order")
 
     pipe = db.pipeline()
     try:
@@ -108,7 +108,7 @@ def process_order():
             pipe.watch(item_id)
             item_entry: StockValue = get_item_from_db(item_id)
             if item_entry.stock < item["quantity"]:
-                return Response("Insufficient Stock", 400)
+                return abort(400, "STOCK ERROR: Insufficient stock available")
         pipe.multi()
         for item in items:
             item_id = item["item_id"]
@@ -118,7 +118,7 @@ def process_order():
         pipe.execute()
         return Response(f"Order: {order_id} successfully processed", status=200)
     except redis.exceptions.WatchError:
-        return abort(400, "Stock changed during transaction, please retry")
+        return abort(400, "STOCK ERROR: Stock changed during *PROCESS ORDER* transaction, please retry")
     finally:
         pipe.reset()
 
@@ -130,7 +130,7 @@ def cancel_order():
     items = request_data.get("items", [])
 
     if not items:
-        return Response("No items provided", 400)
+        return abort(400, "STOCK ERROR: No items provided when cancelling order")
 
     pipe = db.pipeline()
     try:
@@ -143,7 +143,7 @@ def cancel_order():
         pipe.execute()
         return Response(f"Item: {order_id} successfully cancelled", status=200)
     except redis.exceptions.WatchError:
-        return abort(400, "Stock changed during transaction, please retry")
+        return abort(400, "STOCK ERROR: Stock changed during *CANCEL ORDER* transaction, please retry")
     finally:
         pipe.reset()
 

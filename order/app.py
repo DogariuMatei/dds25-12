@@ -106,7 +106,7 @@ def find_order(order_id: str):
 
 def send_post_request(url: str, json_data=None):
     try:
-        response = requests.post(url, json=json_data)
+        response = requests.post(url, json=json_data, timeout=5)
     except requests.exceptions.RequestException:
         abort(400, REQ_ERROR_STR)
     else:
@@ -158,7 +158,7 @@ def checkout(order_id: str):
 
     orchestrator_reply = send_post_request(f"{GATEWAY_URL}/orchestrator/handle", request_data)
     if orchestrator_reply.status_code != 200:
-        return abort(400, "orchestrator failed in order service")
+        return abort(400, orchestrator_reply.text)
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:

@@ -49,7 +49,7 @@ class Order(Struct):
 
 def send_post_request(url: str, json_data=None):
     try:
-        response = requests.post(url, json=json_data)
+        response = requests.post(url, json=json_data, timeout=5)
     except requests.exceptions.RequestException:
         abort(400, REQ_ERROR_STR)
     else:
@@ -96,12 +96,12 @@ def handle_order():
     }
     stock_reply = send_post_request(f"{GATEWAY_URL}/stock/process", stock_request)
     if stock_reply.status_code != 200:
-        return Response("Checkout failed: Stock insufficient for Order {order.order_id}", status=400)
+        return Response(stock_reply.text, status=400)
     # Step 2: Process payment
     payment_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order.user_id}/{order.total_cost}")
     if payment_reply.status_code != 200:
         send_post_request(f"{GATEWAY_URL}/stock/cancel", stock_request)
-        return Response("Checkout failed: Payment insufficient for Order {order.order_id}", status=400)
+        return Response(payment_reply.text, status=400)
     # Successful
     order.paid = True
     return Response("Checkout successful", status=200)
