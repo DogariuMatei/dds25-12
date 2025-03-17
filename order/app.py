@@ -57,6 +57,8 @@ def get_order_from_db(order_id: str) -> OrderValue | None:
 def create_order(user_id: str):
     key = str(uuid.uuid4())
     value = msgpack.encode(OrderValue(paid=False, items=[], user_id=user_id, total_cost=0))
+
+    app.logger.debug(f"Creating order for user {user_id}")
     try:
         db.set(key, value)
     except redis.exceptions.RedisError:
@@ -149,6 +151,8 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
 
+    print(f"ORDER: {order_id}")
+
     app.logger.debug(f"Checking out order {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
 
@@ -167,6 +171,7 @@ def checkout(order_id: str):
         url_prepare_stock = f"{GATEWAY_URL}/stock/prepare_subtract/{transaction_id}/{item_id}/{quantity}"
         stock_resp = send_post_request(url_prepare_stock)
         if stock_resp.status_code != 200:
+            print(f"Failed to prepare stock for item {item_id}")
             send_post_request(f"{GATEWAY_URL}/stock/abort/{transaction_id}")
             abort(400, f"Failed to prepare stock for item {item_id}")
         prepared_items.append((item_id, quantity))
@@ -174,6 +179,7 @@ def checkout(order_id: str):
     url_prepare_pay = f"{GATEWAY_URL}/payment/prepare_pay/{transaction_id}/{order_entry.user_id}/{order_entry.total_cost}"
     pay_resp = send_post_request(url_prepare_pay)
     if pay_resp.status_code != 200:
+        print(f"Not enough credit to prepare payment")
         send_post_request(f"{GATEWAY_URL}/stock/abort/{transaction_id}")
         abort(400, "Not enough credit to prepare payment")
 
@@ -183,16 +189,20 @@ def checkout(order_id: str):
 
     stock_commit_resp = send_post_request(f"{GATEWAY_URL}/stock/commit/{transaction_id}")
     if stock_commit_resp.status_code != 200:
+        print(f"Failed to commit stock")
         abort(500, "Failed to commit stock")
+
 
     payment_commit_resp = send_post_request(f"{GATEWAY_URL}/payment/commit/{transaction_id}")
     if payment_commit_resp.status_code != 200:
+        print(f"Failed to commit payment")
         abort(500, "Failed to commit payment")
 
     order_entry.paid = True
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
+        print(f"fucked error")
         abort(400, DB_ERROR_STR)
 
     app.logger.debug("Checkout successful (2PC)")
