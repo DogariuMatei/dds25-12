@@ -156,7 +156,7 @@ def checkout(order_id: str):
         "total_cost": total_cost
     }
 
-    orchestrator_reply = send_post_request(f"{GATEWAY_URL}/orchestrator/handle", request_data)
+    orchestrator_reply = send_post_request(f"{GATEWAY_URL}/orchestrator/receive", request_data)
     if orchestrator_reply.status_code != 200:
         return abort(400, orchestrator_reply.text)
     try:

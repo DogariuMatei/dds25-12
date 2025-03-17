@@ -43,8 +43,9 @@ class Order(Struct):
     order_id: str
     user_id: str
     total_cost: int
-    items: list  # List of items with quantities
+    items: list
     paid: bool = False
+    status: str
 
 
 def send_post_request(url: str, json_data=None):
@@ -55,40 +56,18 @@ def send_post_request(url: str, json_data=None):
     else:
         return response
 
+def process_order():
+    return
 
-async def process_order(order: Order):
-    # Step 1: Process stock
-    stock_request = {
-        "order_id": order.order_id,
-        "items": [{"item_id": item_id, "quantity": quantity} for item_id, quantity in order.items]
-    }
-    stock_reply = await send_post_request(f"{GATEWAY_URL}/stock/process", stock_request)
-    if stock_reply.status_code != 200:
-        return f"Stock processing failed for order {order.order_id}"
-    # Step 2: Process payment
-    payment_reply = await send_post_request(f"{GATEWAY_URL}/payment/pay/{order.user_id}/{order.total_cost}")
-    if payment_reply.status_code != 200:
-        await send_post_request(f"{GATEWAY_URL}/stock/cancel", stock_request)
-        return f"User payment failed for order {order.order_id}"
-    # Successful
-    order.paid = True
-    try:
-        await db.set(order.order_id, msgpack.encode(order))
-    except redis.exceptions.RedisError:
-        return f"Failed to save order {order.order_id} in DB"
-        # Rollback everything xd
-    await send_post_request(f"{GATEWAY_URL}/orders/order_status/{order.order_id}/{order.paid}")
-    return f"Order {order.order_id} processed successfully"
-
-
-@app.post('/handle')
-def handle_order():
+@app.post('/receive')
+def receive_order():
     request_data = request.get_json()
     user_id = request_data.get("user_id")
     order_id = request_data.get("order_id")
     total_cost = request_data.get("total_cost")
     items = request_data.get("items")
-    order = Order(order_id, user_id, total_cost, items, False)
+    # add to log
+    order = Order(order_id, user_id, total_cost, items, False, "RECEIVED")
 
     stock_request = {
         "order_id": order.order_id,
