@@ -151,8 +151,6 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
 
-    print(f"ORDER: {order_id}")
-
     app.logger.debug(f"Checking out order {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
 
@@ -171,17 +169,19 @@ def checkout(order_id: str):
         url_prepare_stock = f"{GATEWAY_URL}/stock/prepare_subtract/{transaction_id}/{item_id}/{quantity}"
         stock_resp = send_post_request(url_prepare_stock)
         if stock_resp.status_code != 200:
-            print(f"Failed to prepare stock for item {item_id}")
+            # print(f"Failed to prepare stock for item {item_id}")
             send_post_request(f"{GATEWAY_URL}/stock/abort/{transaction_id}")
             abort(400, f"Failed to prepare stock for item {item_id}")
         prepared_items.append((item_id, quantity))
+        print(f"SUCCESS PREP for item {item_id}")
 
     url_prepare_pay = f"{GATEWAY_URL}/payment/prepare_pay/{transaction_id}/{order_entry.user_id}/{order_entry.total_cost}"
     pay_resp = send_post_request(url_prepare_pay)
     if pay_resp.status_code != 200:
-        print(f"Not enough credit to prepare payment")
+        # print(f"Not enough credit to prepare payment")
         send_post_request(f"{GATEWAY_URL}/stock/abort/{transaction_id}")
         abort(400, "Not enough credit to prepare payment")
+    print(f"SUCCESS PREP PAY for item {item_id}")
 
 
     # --- PHASE 2: COMMIT ---

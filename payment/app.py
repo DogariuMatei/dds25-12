@@ -110,22 +110,27 @@ def remove_credit(user_id: str, amount: int):
 def prepare_pay(txn_id: str, user_id: str, amount: int):
     user = get_user_from_db(user_id)
     amt = int(amount)
+    # print(f"prepare {amt}")
 
     if user.credit < amt:
+        # print(f"Not enough credit")
         abort(400, "Not enough credit")
 
     user.credit -= amt
     if user.credit < 0:
+        # print(f"User credit cannot be negative")
         abort(400, "User credit cannot be negative")
 
     try:
         db.set(user_id, msgpack.encode(user))
     except redis.exceptions.RedisError:
+        print(f"ERROR: {DB_ERROR_STR}")
         abort(400, DB_ERROR_STR)
 
     try:
         db.hset(f"txn:{txn_id}:payment", mapping={"user_id": user_id, "amount": amt})
     except redis.exceptions.RedisError:
+        print(f"ERROR: {DB_ERROR_STR}")
         abort(400, DB_ERROR_STR)
 
     return Response("Payment prepared", status=200)
@@ -137,6 +142,7 @@ def commit_payment(txn_id: str):
     try:
         db.delete(key)
     except redis.exceptions.RedisError:
+        print(f"ERROR COMMIT PAY: {DB_ERROR_STR}")
         abort(400, DB_ERROR_STR)
 
     return Response("Payment commit successful", status=200)
@@ -161,6 +167,7 @@ def abort_payment(txn_id: str):
         db.delete(key)
 
     except redis.exceptions.RedisError:
+        print(f"ERROR ABORT PAY: {DB_ERROR_STR}")
         abort(400, DB_ERROR_STR)
 
     return Response("Payment abort successful", status=200)

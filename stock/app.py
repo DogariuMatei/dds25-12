@@ -116,20 +116,24 @@ def prepare_subtract(txn_id: str, item_id: str, amount: int):
     amt = int(amount)
 
     if item_entry.stock < amt:
+        # print(f"Not enough stock on item {item_id}")
         abort(400, f"Not enough stock on item {item_id}")
 
     item_entry.stock -= amt
     if item_entry.stock < 0:
+        # print(f"Item stock cannot be negative")
         abort(400, "Item stock cannot be negative")
 
     try:
         db.set(item_id, msgpack.encode(item_entry))
     except redis.exceptions.RedisError:
+        print(f"ERROR: {DB_ERROR_STR}")
         abort(400, DB_ERROR_STR)
 
     try:
         db.hset(f"txn:{txn_id}:stock", item_id, amt)
     except redis.exceptions.RedisError:
+        print(f"ERROR: {DB_ERROR_STR}")
         abort(400, DB_ERROR_STR)
 
     return Response(f"Stock reserved for item {item_id}: {amt}", status=200)
@@ -141,6 +145,7 @@ def commit_stock(txn_id: str):
     try:
         db.delete(reservation_key)
     except redis.exceptions.RedisError:
+        print(f"ERROR COMMIT STOCK: {DB_ERROR_STR}")
         abort(400, DB_ERROR_STR)
 
     return Response("Stock commit successful", status=200)
@@ -162,6 +167,7 @@ def abort_stock(txn_id: str):
 
         db.delete(reservation_key)
     except redis.exceptions.RedisError:
+        print(f"ERROR ABORT STOCK: {DB_ERROR_STR}")
         abort(400, DB_ERROR_STR)
 
     return Response("Stock abort completed", status=200)
