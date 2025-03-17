@@ -18,14 +18,17 @@ DB_ERROR_STR = "DB error"
 # Stream keys
 STOCK_EVENTS = "stock:events"
 PAYMENT_EVENTS = "payment:events"
+ORDER_EVENTS = "order:events"
 
 # Event types
-STOCK_SUBTRACTION_FAILED = "stock.subtraction.failed"  # we consume
-STOCK_RESERVED = "stock.reserved" # we consume
-PAYMENT_SUCCEEDED = "payment.succeeded" # we post
-PAYMENT_FAILED = "payment.failed" # we post
+ORDER_CREATED = "order.created"
+PAYMENT_RESERVED = "payment.reserved"
+STOCK_FAILED = "stock.failed"
+STOCK_SUCCEEDED = "stock.succeeded"
+STOCK_ROLLBACK = "stock.rollback"
 
 # Consumer groups
+PAYMENT_ORDER_GROUP = "payment-order-consumers"
 PAYMENT_STOCK_GROUP = "payment-stock-consumers"
 
 app = Flask("payment-service")
@@ -48,6 +51,7 @@ atexit.register(close_db_connection)
 
 class UserValue(Struct):
     credit: int
+    reserved: int = 0
 
 
 def publish_event(stream, event_type, data):
@@ -212,17 +216,49 @@ def remove_credit( user_id: str, amount: int):
 
 
 @user_locking
-def remove_credit_async(user_id, amount):
-    """Remove credit from a user with locking handled by decorator"""
+def reserve_credit(user_id, amount):
+    """Reserve credit from a user with locking handled by decorator"""
     try:
         user_entry = get_user_from_db(user_id)
         amount = int(amount)
 
-        if user_entry.credit < amount:
+        # Check if user has enough available credit
+        if user_entry.credit - user_entry.reserved < amount:
+            return False, f"User: {user_id} does not have enough credit (has {user_entry.credit - user_entry.reserved} available, needs {amount})"
+
+        # Mark the funds as reserved
+        user_entry.reserved += amount
+
+        try:
+            pipe = db.pipeline(transaction=True)
+            pipe.set(user_id, msgpack.encode(user_entry))
+            pipe.execute()
+            return True, "Credit reserved successfully"
+        except redis.exceptions.RedisError as e:
+            app.logger.error(f"DB error when reserving credit: {e}")
+            return False, f"DB error when reserving credit: {e}"
+
+    except Exception as e:
+        app.logger.error(f"Error reserving credit for user {user_id}: {e}")
+        return False, f"Error reserving credit: {e}"
+
+
+# Function to confirm the payment when stock processing succeeds
+@user_locking
+def confirm_payment(user_id, amount):
+    """Confirm reserved payment by converting reservation to actual payment"""
+    try:
+        user_entry = get_user_from_db(user_id)
+        amount = int(amount)
+
+        # Check that the amount is actually reserved
+        if user_entry.reserved < amount:
+            app.logger.error(
+                f"Cannot confirm payment: user {user_id} has only {user_entry.reserved} reserved, trying to confirm {amount}")
             return False
 
-        # Update credit
         user_entry.credit -= amount
+        user_entry.reserved -= amount
 
         try:
             pipe = db.pipeline(transaction=True)
@@ -230,16 +266,17 @@ def remove_credit_async(user_id, amount):
             pipe.execute()
             return True
         except redis.exceptions.RedisError as e:
-            app.logger.error(f"DB error when removing credit: {e}")
+            app.logger.error(f"DB error when confirming payment: {e}")
             return False
     except Exception as e:
-        app.logger.error(f"Error removing credit for user {user_id}: {e}")
+        app.logger.error(f"Error confirming payment for user {user_id}: {e}")
         return False
 
 
+# Function to cancel reservation if stock processing fails
 @user_locking
-def add_credit_async(user_id, amount):
-    """Add credit to a user with locking handled by decorator"""
+def cancel_reservation(user_id, amount):
+    """Cancel a credit reservation"""
     try:
         user_entry = get_user_from_db(user_id)
 
@@ -247,7 +284,11 @@ def add_credit_async(user_id, amount):
             amount = sum(amount)
         amount = int(amount)
 
-        user_entry.credit += amount
+        # Verify there's enough reserved to cancel
+        if user_entry.reserved < amount:
+            user_entry.reserved = 0  # Reset to zero in case of inconsistency
+        else:
+            user_entry.reserved -= amount
 
         try:
             pipe = db.pipeline(transaction=True)
@@ -255,97 +296,132 @@ def add_credit_async(user_id, amount):
             pipe.execute()
             return True
         except redis.exceptions.RedisError as e:
-            app.logger.error(f"DB error when adding credit: {e}")
+            app.logger.error(f"DB error when canceling reservation: {e}")
             return False
     except Exception as e:
-        app.logger.error(f"Error adding credit for user {user_id}: {e}")
+        app.logger.error(f"Error canceling reservation for user {user_id}: {e}")
         return False
 
 
-def process_stock_events():
-    """Process events from the stock stream"""
-    consumer_name = f"payment-consumer-{uuid.uuid4()}"
-    ensure_consumer_group(STOCK_EVENTS, PAYMENT_STOCK_GROUP)
+def process_order_events():
+    """Process events from the order stream"""
+    consumer_name_order = f"payment-order-consumer-{uuid.uuid4()}"
+    ensure_consumer_group(ORDER_EVENTS, PAYMENT_ORDER_GROUP)
 
     while True:
         try:
-            messages = event_db.xreadgroup(
-                PAYMENT_STOCK_GROUP,
-                consumer_name,
-                {STOCK_EVENTS: '>'},
+            messages_order = event_db.xreadgroup(
+                PAYMENT_ORDER_GROUP,
+                consumer_name_order,
+                {ORDER_EVENTS: '>'},
                 count=1,
                 block=5000
             )
 
-            if not messages:
+            if not messages_order:
                 continue
 
-            for stream_name, stream_messages in messages:
+            for stream_name, stream_messages in messages_order:
                 for message_id, message in stream_messages:
                     event = json.loads(message[b'event'].decode())
                     event_type = event.get('type')
                     event_data = event.get('data', {})
 
                     try:
-                        if event_type == STOCK_RESERVED:
+                        if event_type == ORDER_CREATED:
                             transaction_id = event_data.get('transaction_id')
                             order_id = event_data.get('order_id')
                             user_id = event_data.get('user_id')
                             total_cost = event_data.get('total_cost')
                             items = event_data.get('items', [])
-                            response_stream= event_data.get('response_stream')
+                            response_stream = event_data.get('response_stream')
 
-                            try:
-                                payment_result = remove_credit_async(user_id, int(total_cost))
-                                if not payment_result:
-                                    publish_event(PAYMENT_EVENTS, PAYMENT_FAILED, {
-                                        "order_id": order_id,
-                                        "user_id": user_id,
-                                        "transaction_id": transaction_id,
-                                        "items": items,
-                                        "total_cost": total_cost,
-                                        "response_stream": response_stream
-                                    })
-                                else:
-                                    # Publish payment success event
-                                    publish_event(PAYMENT_EVENTS, PAYMENT_SUCCEEDED, {
-                                        "user_id": user_id,
-                                        "transaction_id": transaction_id,
-                                        "order_id": order_id,
-                                        "items": items,
-                                        "total_cost": total_cost,
-                                        "response_stream": response_stream
-                                    })
+                            payment_possible, reason = reserve_credit(user_id, int(total_cost))
 
-                            except Exception as e:
-                                reason = f"Error processing payment: {e}"
+                            if not payment_possible:
+                                cancel_reservation(user_id, int(total_cost))
                                 add_to_response_stream(response_stream, order_id, "failed", reason)
+                            else:
+                                publish_event(PAYMENT_EVENTS, PAYMENT_RESERVED, {
+                                    "order_id": order_id,
+                                    "user_id": user_id,
+                                    "transaction_id": transaction_id,
+                                    "items": items,
+                                    "total_cost": total_cost,
+                                    "response_stream": response_stream
+                                })
 
+                        event_db.xack(stream_name, PAYMENT_ORDER_GROUP, message_id)
+                    except Exception as e:
+                        app.logger.error(f"Error processing order event {event_type}: {e}")
+        except Exception as e:
+            app.logger.error(f"Error in order events consumer: {e}")
+            time.sleep(0.1)
 
-                        elif event_type == STOCK_SUBTRACTION_FAILED:
+def process_stock_events():
+    """Process events from the stock stream"""
+    consumer_name_stock = f"payment-stock-consumer-{uuid.uuid4()}"
+    ensure_consumer_group(STOCK_EVENTS, PAYMENT_STOCK_GROUP)
+
+    while True:
+        try:
+            messages_stock = event_db.xreadgroup(
+                PAYMENT_STOCK_GROUP,
+                consumer_name_stock,
+                {STOCK_EVENTS: '>'},
+                count=1,
+                block=5000
+            )
+
+            if not messages_stock:
+                continue
+
+            for stream_name, stream_messages in messages_stock:
+                for message_id, message in stream_messages:
+                    event = json.loads(message[b'event'].decode())
+                    event_type = event.get('type')
+                    event_data = event.get('data', {})
+                    try:
+                        if event_type == STOCK_SUCCEEDED:
+                            transaction_id = event_data.get('transaction_id')
+                            order_id = event_data.get('order_id')
+                            user_id = event_data.get('user_id')
+                            total_cost = event_data.get('total_cost')
+                            items = event_data.get('items', [])
+                            response_stream = event_data.get('response_stream')
+
+                            # Complete the payment by finalizing the reserved amount
+                            payment_confirmed = confirm_payment(user_id, int(total_cost))
+
+                            if payment_confirmed:
+                                add_to_response_stream(response_stream, order_id, "success","payment OK and stock OK")
+                            else:
+                                app.logger.error(f"Stock succeeded but payment confirmation failed for order {order_id}")
+                                publish_event(PAYMENT_EVENTS, STOCK_ROLLBACK, {
+                                    "order_id": order_id,
+                                    "user_id": user_id,
+                                    "transaction_id": transaction_id,
+                                    "items": items,
+                                    "total_cost": total_cost,
+                                    "response_stream": response_stream,
+                                })
+
+                        if event_type == STOCK_FAILED:
                             order_id = event_data.get('order_id')
                             user_id = event_data.get('user_id')
                             total_cost = event_data.get('total_cost')
                             response_stream = event_data.get('response_stream')
 
-                            try:
-                                rollback_result = add_credit_async(user_id, sum(total_cost))
-                                if rollback_result:
-                                    reason = "Payment rollback success!"
-                                else:
-                                    reason = "Payment rollback failed!"
-                                add_to_response_stream(response_stream, order_id, "failed", reason)
+                            # Cancel the payment reservation
+                            reservation_canceled = cancel_reservation(user_id, int(total_cost))
 
-                            except Exception as e:
-                                reason = f"Error rolling back payment: {e}"
-                                app.logger.error(reason)
-                                add_to_response_stream(response_stream, order_id, "failed", reason)
+                            if not reservation_canceled:
+                                app.logger.error(f"Failed to cancel reservation for order {order_id}")
+                            add_to_response_stream(response_stream, order_id, "failed", f"Order processing failed")
 
-                        # Acknowledge the message
-                        db.xack(stream_name, PAYMENT_STOCK_GROUP, message_id)
+                        event_db.xack(stream_name, PAYMENT_STOCK_GROUP, message_id)
                     except Exception as e:
-                        app.logger.error(f"Error processing stock event {event_type}: {e}")
-
+                        app.logger.error(f"Error processing order event {event_type}: {e}")
         except Exception as e:
             app.logger.error(f"Error in stock events consumer: {e}")
             time.sleep(0.1)
@@ -353,13 +429,15 @@ def process_stock_events():
 
 def start_consumers():
     """Start background threads for event processing"""
+    order_consumer_thread = threading.Thread(target=process_order_events, daemon=True)
     stock_consumer_thread = threading.Thread(target=process_stock_events, daemon=True)
+    order_consumer_thread.start()
     stock_consumer_thread.start()
 
 
 def initialize_streams():
-    """Initialize Redis Streams and consumer groups"""
     ensure_consumer_group(PAYMENT_EVENTS, "init-group")
+    ensure_consumer_group(STOCK_EVENTS, "init-group")
 
 
 def initialize_app():
