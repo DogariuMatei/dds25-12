@@ -155,7 +155,6 @@ def release_lock(lock_key, lock_id):
 
 
 def get_item_from_db(item_id: str) -> StockValue | None:
-    # get serialized data
     try:
         entry: bytes = db.get(item_id)
     except redis.exceptions.RedisError:
@@ -216,43 +215,17 @@ def add_stock(item_id: str, amount: int):
 
 @app.post('/subtract/<item_id>/<amount>')
 def remove_stock(item_id: str, amount: int):
-    lock_key = f"lock:stock:{item_id}"
-    lock_id = str(uuid.uuid4())
-
-    # Try to acquire lock
-    lock_acquired = db.set(lock_key, lock_id, nx=True, ex=50)
-    if not lock_acquired:
-        return abort(409, f"Item {item_id} is currently being modified by another process")
-
+    item_entry: StockValue = get_item_from_db(item_id)
+    # update stock, serialize and update database
+    item_entry.stock -= int(amount)
+    app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
+    if item_entry.stock < 0:
+        abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
     try:
-        item_entry: StockValue = get_item_from_db(item_id)
-        amount = int(amount)
-
-        # Check if we have enough available stock (accounting for reservations)
-        if item_entry.stock - item_entry.reserved < amount:
-            return abort(400, f"Item: {item_id} does not have enough available stock!")
-
-        # Reserve the stock rather than immediately subtracting
-        item_entry.reserved += amount
-
-        try:
-            db.set(item_id, msgpack.encode(item_entry))
-
-        except redis.exceptions.RedisError:
-            return abort(400, DB_ERROR_STR)
-
-        return Response(f"Item: {item_id} stock reserved. Available: {item_entry.stock - item_entry.reserved}",
-                        status=200)
-    finally:
-        # Release lock
-        script = """
-        if redis.call('get', KEYS[1]) == ARGV[1] then
-            return redis.call('del', KEYS[1])
-        else
-            return 0
-        end
-        """
-        db.eval(script, 1, lock_key, lock_id)
+        db.set(item_id, msgpack.encode(item_entry))
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
 @two_phase_locking

@@ -20,9 +20,6 @@ REQ_ERROR_STR = "Requests error"
 # Stream keys
 ORDER_EVENTS = "order:events"
 
-# PAYMENT_EVENTS = "payment:events"
-# STOCK_EVENTS = "stock:events"
-
 # Event types
 ORDER_CREATED = "order.created" # we post
 
@@ -223,7 +220,7 @@ def checkout(order_id: str):
     if not event:
         return abort(400, "Failed to publish order event")
 
-    timeout = 1000000
+    timeout = 100
     start_time = time.time()
 
     while time.time() - start_time < timeout:

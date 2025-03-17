@@ -269,7 +269,6 @@ def process_stock_events():
 
     while True:
         try:
-            # Read new messages
             messages = event_db.xreadgroup(
                 PAYMENT_STOCK_GROUP,
                 consumer_name,
