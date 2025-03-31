@@ -8,6 +8,8 @@ services:
       restart_policy:
         condition: on-failure
     command: redis-server --requirepass redis --maxmemory 512mb
+    networks:
+      - app-network
 
   gateway:
     image: nginx:1.25-bookworm
@@ -20,6 +22,8 @@ services:
       - stock-service
       - payment-service
       - event-bus
+    networks:
+      - app-network
 
   order-service:
     build: ./order
@@ -38,6 +42,8 @@ services:
     depends_on:
       - order-db
       - event-bus
+    networks:
+      - app-network
 
   stock-service:
     build: ./stock
@@ -55,6 +61,8 @@ services:
     depends_on:
       - stock-db
       - event-bus
+    networks:
+      - app-network
 
   payment-service:
     build: ./payment
@@ -72,15 +80,28 @@ services:
     depends_on:
       - payment-db
       - event-bus
+    networks:
+      - app-network
 
   order-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+    networks:
+      - app-network
 
   stock-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+    networks:
+      - app-network
 
   payment-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: overlay
+    attachable: true
