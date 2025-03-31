@@ -3,6 +3,10 @@ services:
 
   event-bus:
     image: redis:7.2-bookworm
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
     command: redis-server --requirepass redis --maxmemory 512mb
 
   gateway:
@@ -20,6 +24,10 @@ services:
   order-service:
     build: ./order
     image: order:latest
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
     environment:
       - GATEWAY_URL=http://gateway:80
       - REDIS_HOST=order-db
@@ -34,6 +42,10 @@ services:
   stock-service:
     build: ./stock
     image: stock:latest
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
     environment:
       - REDIS_HOST=stock-db
       - EVENT_REDIS_HOST=event-bus
@@ -47,6 +59,10 @@ services:
   payment-service:
     build: ./payment
     image: user:latest
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
     environment:
       - REDIS_HOST=payment-db
       - EVENT_REDIS_HOST=event-bus
