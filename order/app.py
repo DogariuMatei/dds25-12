@@ -11,7 +11,7 @@ import requests
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
-
+from redis import Sentinel
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
@@ -32,10 +32,15 @@ GATEWAY_URL = os.environ['GATEWAY_URL']
 
 app = Flask("order-service")
 
-db: redis.Redis = redis.Redis( host=os.environ['REDIS_HOST'],
-                               port=int(os.environ['REDIS_PORT']),
-                               password=os.environ['REDIS_PASSWORD'],
-                               db=int(os.environ['REDIS_DB']))
+sentinel = Sentinel([('sentinel-host', 26379)], socket_timeout=0.1)
+master = sentinel.master_for('mymaster', password='redis', db=0)
+
+db: redis.Redis = redis.Redis(
+    host=master.host,  # Use the master host
+    port=master.port,  # Use the master port
+    password=os.environ['REDIS_PASSWORD'],  # Set the password
+    db=int(os.environ['REDIS_DB'])  # Select the DB
+)
 
 event_db: redis.Redis = redis.Redis( host=os.environ.get('EVENT_REDIS_HOST', 'localhost'),
                         port=int(os.environ.get('REDIS_PORT', 6379)),

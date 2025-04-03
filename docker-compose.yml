@@ -89,15 +89,69 @@ services:
     networks:
       - app-network
 
+  order-db-replica:
+    image: redis:7.2-bookworm
+    command: redis-server --requirepass redis --maxmemory 512mb --slaveof order-db 6379 --masterauth redis
+    networks:
+      - app-network
+
   stock-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
     networks:
       - app-network
 
+  stock-db-replica:
+    image: redis:7.2-bookworm
+    command: redis-server --requirepass redis --maxmemory 512mb --slaveof stock-db 6379 --masterauth redis
+    networks:
+      - app-network
+
   payment-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+    networks:
+      - app-network
+
+  payment-db-replica:
+    image: redis:7.2-bookworm
+    command: redis-server --requirepass redis --maxmemory 512mb --slaveof payment-db 6379 --masterauth redis
+    networks:
+      - app-network
+
+  redis-sentinel-order:
+    image: redis:7.2-bookworm
+    command: redis-server /etc/redis/sentinel-order.conf --sentinel
+    volumes:
+      - ./sentinel-configs/sentinel-order.conf:/etc/redis/sentinel-order.conf
+    environment:
+      - REDIS_PASSWORD=redis
+    depends_on:
+      - order-db
+    networks:
+      - app-network
+
+  redis-sentinel-stock:
+    image: redis:7.2-bookworm
+    command: redis-server /etc/redis/sentinel-stock.conf --sentinel
+    volumes:
+      - ./sentinel-configs/sentinel-stock.conf:/etc/redis/sentinel-stock.conf
+    environment:
+      - REDIS_PASSWORD=redis
+    depends_on:
+      - stock-db
+    networks:
+      - app-network
+
+  redis-sentinel-payment:
+    image: redis:7.2-bookworm
+    command: redis-server /etc/redis/sentinel-payment.conf --sentinel
+    volumes:
+      - ./sentinel-configs/sentinel-payment.conf:/etc/redis/sentinel-payment.conf
+    environment:
+      - REDIS_PASSWORD=redis
+    depends_on:
+      - payment-db
     networks:
       - app-network
 
