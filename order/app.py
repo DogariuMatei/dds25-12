@@ -160,7 +160,7 @@ def send_get_request(url: str):
     try:
         response = requests.get(url)
     except requests.exceptions.RequestException:
-        abort(400, REQ_ERROR_STR)
+        abort(400, "Failed in sending get request")
     else:
         return response
 
@@ -178,7 +178,7 @@ def add_item(order_id: str, item_id: str, quantity: int):
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+        return abort(400, "DATABASE ERROR")
     return Response(f"Item: {item_id} added to: {order_id} price updated to: {order_entry.total_cost}",
                     status=200)
 

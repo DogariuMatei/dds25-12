@@ -28,6 +28,7 @@ spec:
       containers:
         - name: order
           image: order:latest
+          imagePullPolicy: Never
           resources:
             limits:
               memory: "1Gi"
@@ -52,3 +53,7 @@ spec:
               value: "redis"
             - name: REDIS_DB
               value: "0"
+            - name: EVENT_REDIS_HOST
+              value: redis-master
+            - name: GATEWAY_URL
+              value: "http://ingress-nginx-controller.ingress-nginx"
