@@ -23,6 +23,7 @@ services:
     environment:
       - GATEWAY_URL=http://gateway:80
       - REDIS_HOST=order-db
+      - SENTINEL_HOST=redis-sentinel-order
       - EVENT_REDIS_HOST=event-bus
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
@@ -30,12 +31,16 @@ services:
     depends_on:
       - order-db
       - event-bus
+    networks:
+      - default
+      - order-net
 
   stock-service:
     build: ./stock
     image: stock:latest
     environment:
       - REDIS_HOST=stock-db
+      - SENTINEL_HOST=redis-sentinel-stock
       - EVENT_REDIS_HOST=event-bus
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
@@ -43,12 +48,16 @@ services:
     depends_on:
       - stock-db
       - event-bus
+    networks:
+      - default
+      - stock-net
 
   payment-service:
     build: ./payment
     image: user:latest
     environment:
       - REDIS_HOST=payment-db
+      - SENTINEL_HOST=redis-sentinel-payment
       - EVENT_REDIS_HOST=event-bus
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
@@ -56,6 +65,9 @@ services:
     depends_on:
       - payment-db
       - event-bus
+    networks:
+      - default
+      - payment-net
 
   order-db:
     image: redis:7.2-bookworm
@@ -73,12 +85,14 @@ services:
 
   redis-sentinel-order:
     image: redis:7.2-bookworm
+    container_name: redis-sentinel-order
     build:
       context: .
       dockerfile: order_dockserfile
     command: [ "bash", "/usr/local/bin/create_order_conf.sh" ]
     environment:
       - REDIS_PASSWORD=redis
+      - REDIS_MASTER_NAME=mymaster
     depends_on:
       - order-db
     networks:
@@ -100,12 +114,14 @@ services:
 
   redis-sentinel-stock:
     image: redis:7.2-bookworm
+    container_name: redis-sentinel-stock
     build:
       context: .
       dockerfile: stock_dockserfile
     command: [ "bash", "/usr/local/bin/create_stock_conf.sh" ]
     environment:
       - REDIS_PASSWORD=redis
+      - REDIS_MASTER_NAME=mymaster
     depends_on:
       - stock-db
     networks:
@@ -127,12 +143,14 @@ services:
 
   redis-sentinel-payment:
     image: redis:7.2-bookworm
+    container_name: redis-sentinel-payment
     build:
       context: .
       dockerfile: payment_dockserfile
     command: [ "bash", "/usr/local/bin/create_payment_conf.sh" ]
     environment:
       - REDIS_PASSWORD=redis
+      - REDIS_MASTER_NAME=mymaster
     depends_on:
       - payment-db
     networks:
