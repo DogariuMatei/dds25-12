@@ -62,71 +62,86 @@ services:
     container_name: order-db
     command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
     networks:
-      - app-net
+      - order-net
 
   order-db-replica:
     image: redis:7.2-bookworm
     container_name: order-db-replica
     command: redis-server --requirepass redis --maxmemory 512mb --slaveof order-db 6379 --masterauth redis
     networks:
-      - app-net
+      - order-net
 
   redis-sentinel-order:
     image: redis:7.2-bookworm
-    command: redis-server /usr/local/etc/redis/sentinel-order.conf --sentinel
-    volumes:
-      - ./sentinel_conf:/usr/local/etc/redis
+    build:
+      context: .
+      dockerfile: order_dockserfile
+    command: [ "bash", "/usr/local/bin/create_order_conf.sh" ]
     environment:
       - REDIS_PASSWORD=redis
     depends_on:
       - order-db
     networks:
-      - app-net
+      - order-net
 
   stock-db:
     image: redis:7.2-bookworm
     container_name: stock-db
     command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
     networks:
-      - app-net
+      - stock-net
 
   stock-db-replica:
     image: redis:7.2-bookworm
     container_name: stock-db-replica
     command: redis-server --requirepass redis --maxmemory 512mb --slaveof stock-db 6379 --masterauth redis
     networks:
-      - app-net
+      - stock-net
 
   redis-sentinel-stock:
     image: redis:7.2-bookworm
-    command: redis-server /usr/local/etc/redis/sentinel-stock.conf --sentinel
-    volumes:
-      - ./sentinel_conf:/usr/local/etc/redis
+    build:
+      context: .
+      dockerfile: stock_dockserfile
+    command: [ "bash", "/usr/local/bin/create_stock_conf.sh" ]
     environment:
       - REDIS_PASSWORD=redis
     depends_on:
       - stock-db
     networks:
-      - app-net
+      - stock-net
 
   payment-db:
     image: redis:7.2-bookworm
+    container_name: payment-db
     command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
+    networks:
+      - payment-net
 
   payment-db-replica:
     image: redis:7.2-bookworm
+    container_name: payment-db-replica
     command: redis-server --requirepass redis --maxmemory 512mb --slaveof payment-db 6379 --masterauth redis
+    networks:
+      - payment-net
 
   redis-sentinel-payment:
     image: redis:7.2-bookworm
-    command: redis-server /etc/redis/sentinel-payment.conf --sentinel
-    volumes:
-      - ./sentinel-configs/sentinel-payment.conf:/etc/redis/sentinel-payment.conf
+    build:
+      context: .
+      dockerfile: payment_dockserfile
+    command: [ "bash", "/usr/local/bin/create_payment_conf.sh" ]
     environment:
       - REDIS_PASSWORD=redis
     depends_on:
       - payment-db
+    networks:
+      - payment-net
 
 networks:
-  app-net:
+  order-net:
+    driver: bridge
+  stock-net:
+    driver: bridge
+  payment-net:
     driver: bridge

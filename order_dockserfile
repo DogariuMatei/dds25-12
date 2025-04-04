@@ -1,0 +1,7 @@
+FROM redis:7.2-bookworm
+
+# Copy the script into the container
+COPY create_order_conf.sh /usr/local/bin/create_order_conf.sh
+
+# Make the script executable
+RUN chmod +x /usr/local/bin/create_order_conf.sh
