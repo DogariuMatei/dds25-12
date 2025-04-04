@@ -59,12 +59,74 @@ services:
 
   order-db:
     image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+    container_name: order-db
+    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
+    networks:
+      - app-net
+
+  order-db-replica:
+    image: redis:7.2-bookworm
+    container_name: order-db-replica
+    command: redis-server --requirepass redis --maxmemory 512mb --slaveof order-db 6379 --masterauth redis
+    networks:
+      - app-net
+
+  redis-sentinel-order:
+    image: redis:7.2-bookworm
+    command: redis-server /usr/local/etc/redis/sentinel-order.conf --sentinel
+    volumes:
+      - ./sentinel_conf:/usr/local/etc/redis
+    environment:
+      - REDIS_PASSWORD=redis
+    depends_on:
+      - order-db
+    networks:
+      - app-net
 
   stock-db:
     image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+    container_name: stock-db
+    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
+    networks:
+      - app-net
+
+  stock-db-replica:
+    image: redis:7.2-bookworm
+    container_name: stock-db-replica
+    command: redis-server --requirepass redis --maxmemory 512mb --slaveof stock-db 6379 --masterauth redis
+    networks:
+      - app-net
+
+  redis-sentinel-stock:
+    image: redis:7.2-bookworm
+    command: redis-server /usr/local/etc/redis/sentinel-stock.conf --sentinel
+    volumes:
+      - ./sentinel_conf:/usr/local/etc/redis
+    environment:
+      - REDIS_PASSWORD=redis
+    depends_on:
+      - stock-db
+    networks:
+      - app-net
 
   payment-db:
     image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
+
+  payment-db-replica:
+    image: redis:7.2-bookworm
+    command: redis-server --requirepass redis --maxmemory 512mb --slaveof payment-db 6379 --masterauth redis
+
+  redis-sentinel-payment:
+    image: redis:7.2-bookworm
+    command: redis-server /etc/redis/sentinel-payment.conf --sentinel
+    volumes:
+      - ./sentinel-configs/sentinel-payment.conf:/etc/redis/sentinel-payment.conf
+    environment:
+      - REDIS_PASSWORD=redis
+    depends_on:
+      - payment-db
+
+networks:
+  app-net:
+    driver: bridge
