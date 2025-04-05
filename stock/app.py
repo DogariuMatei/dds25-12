@@ -12,6 +12,8 @@ from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 from functools import wraps
 
+from redis import Sentinel
+
 DB_ERROR_STR = "DB error"
 
 # Stream keys
@@ -34,10 +36,15 @@ STOCK_PAYMENT_GROUP = "stock-payment-consumers"
 
 app = Flask("stock-service")
 
-db: redis.Redis = redis.Redis( host=os.environ['REDIS_HOST'],
-                               port=int(os.environ['REDIS_PORT']),
-                               password=os.environ['REDIS_PASSWORD'],
-                               db=int(os.environ['REDIS_DB']))
+# Multiple sentinels
+sentinel_hosts = [(host.strip(), int(os.environ['SENTINEL_PORT'])) for host in os.environ['SENTINEL_HOST'].split(',')]
+sentinel = Sentinel(sentinel_hosts, socket_timeout=0.1, password=os.environ['REDIS_PASSWORD'])
+
+# Get the master Redis instance
+db = sentinel.master_for(os.environ['REDIS_MASTER_NAME'],
+                          socket_timeout=0.1,
+                          password=os.environ['REDIS_PASSWORD'],
+                          db=int(os.environ['REDIS_DB']))
 
 event_db: redis.Redis = redis.Redis( host=os.environ.get('EVENT_REDIS_HOST', 'localhost'),
                         port=int(os.environ.get('REDIS_PORT', 6379)),
@@ -173,8 +180,8 @@ def create_item(price: int):
     value = msgpack.encode(StockValue(stock=0, price=int(price), reserved=0))
     try:
         db.set(key, value)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+    except redis.exceptions.RedisError as e:
+        return abort(400, str(e))
     return jsonify({'item_id': key})
 
 @app.post('/batch_init/<n>/<starting_stock>/<item_price>')

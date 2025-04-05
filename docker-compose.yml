@@ -35,7 +35,11 @@ services:
     build: ./stock
     image: stock:latest
     environment:
-      - REDIS_HOST=stock-db
+      - SENTINEL_HOST=sentinel-1,sentinel-2,sentinel-3
+      - SENTINEL_PORT=26379
+      - REDIS_MASTER_NAME=mymaster
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
       - EVENT_REDIS_HOST=event-bus
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
@@ -43,6 +47,9 @@ services:
     depends_on:
       - stock-db
       - event-bus
+    networks:
+      - default
+      - stock-net
 
   payment-service:
     build: ./payment
@@ -63,8 +70,125 @@ services:
 
   stock-db:
     image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+    container_name: stock-db
+    hostname: stock-db
+    ports:
+      - "6379:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "redis",
+        "--maxmemory",
+        "512mb",
+        "--replica-announce-port",
+        "6379",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--protected-mode",
+        "no",
+        "--masterauth",
+        "redis"
+      ]
+    networks:
+      - stock-net
+
+  stock-db-slave:
+    image: redis:7.2-bookworm
+    container_name: stock-db-slave
+    hostname: stock-db-slave
+    depends_on:
+      - stock-db
+    ports:
+      - "6380:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "redis",
+        "--maxmemory",
+        "512mb",
+        "--appendonly",
+        "yes",
+        "--replicaof",
+        "stock-db",
+        "6379",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--replica-announce-port",
+        "6380",
+        "--protected-mode",
+        "no",
+        "--masterauth",
+        "redis"
+      ]
+    networks:
+      - stock-net
+
+  sentinel-1:
+    image: redis:7.2-bookworm
+    container_name: sentinel-1
+    hostname: sentinel-1
+    depends_on:
+      - stock-db
+    ports:
+      - "26379:26379"
+    command: >
+      sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
+            echo "sentinel monitor mymaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass mymaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs mymaster 1" >> /etc/sentinel.conf &&
+            redis-sentinel /etc/sentinel.conf'
+    networks:
+      - stock-net
+
+  sentinel-2:
+    image: redis:7.2-bookworm
+    container_name: sentinel-2
+    hostname: sentinel-2
+    depends_on:
+      - stock-db
+    ports:
+      - "26380:26379"
+    command: >
+      sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
+            echo "sentinel monitor mymaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass mymaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs mymaster 1" >> /etc/sentinel.conf &&
+            redis-sentinel /etc/sentinel.conf'
+    networks:
+      - stock-net
+
+  sentinel-3:
+    image: redis:7.2-bookworm
+    container_name: sentinel-3
+    hostname: sentinel-3
+    depends_on:
+      - stock-db
+    ports:
+      - "26381:26379"
+    command: >
+      sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
+            echo "sentinel monitor mymaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass mymaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout mymaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs mymaster 1" >> /etc/sentinel.conf &&
+            redis-sentinel /etc/sentinel.conf'
+    networks:
+      - stock-net
 
   payment-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+
+networks:
+  stock-net:
+    driver: bridge
