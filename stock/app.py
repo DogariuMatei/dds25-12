@@ -36,11 +36,9 @@ STOCK_PAYMENT_GROUP = "stock-payment-consumers"
 
 app = Flask("stock-service")
 
-# Multiple sentinels
 sentinel_hosts = [(host.strip(), int(os.environ['SENTINEL_PORT'])) for host in os.environ['SENTINEL_HOST'].split(',')]
 sentinel = Sentinel(sentinel_hosts, socket_timeout=0.1, password=os.environ['REDIS_PASSWORD'])
 
-# Get the master Redis instance
 db = sentinel.master_for(os.environ['REDIS_MASTER_NAME'],
                           socket_timeout=0.1,
                           password=os.environ['REDIS_PASSWORD'],

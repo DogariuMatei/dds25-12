@@ -22,7 +22,11 @@ services:
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
-      - REDIS_HOST=order-db
+      - SENTINEL_HOST=sentinel-1,sentinel-2,sentinel-3
+      - SENTINEL_PORT=26379
+      - REDIS_MASTER_NAME=ordermaster
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
       - EVENT_REDIS_HOST=event-bus
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
@@ -30,6 +34,9 @@ services:
     depends_on:
       - order-db
       - event-bus
+    networks:
+      - default
+      - order-net
 
   stock-service:
     build: ./stock
@@ -37,7 +44,7 @@ services:
     environment:
       - SENTINEL_HOST=sentinel-1,sentinel-2,sentinel-3
       - SENTINEL_PORT=26379
-      - REDIS_MASTER_NAME=mymaster
+      - REDIS_MASTER_NAME=stockmaster
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
       - EVENT_REDIS_HOST=event-bus
@@ -55,7 +62,11 @@ services:
     build: ./payment
     image: user:latest
     environment:
-      - REDIS_HOST=payment-db
+      - SENTINEL_HOST=sentinel-1,sentinel-2,sentinel-3
+      - SENTINEL_PORT=26379
+      - REDIS_MASTER_NAME=paymentmaster
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
       - EVENT_REDIS_HOST=event-bus
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
@@ -63,10 +74,66 @@ services:
     depends_on:
       - payment-db
       - event-bus
+    networks:
+      - default
+      - payment-net
 
   order-db:
     image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+    container_name: order-db
+    hostname: order-db
+    ports:
+      - "6381:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "redis",
+        "--maxmemory",
+        "512mb",
+        "--replica-announce-port",
+        "6381",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--protected-mode",
+        "no",
+        "--masterauth",
+        "redis"
+      ]
+    networks:
+      - order-net
+
+  order-db-slave:
+    image: redis:7.2-bookworm
+    container_name: order-db-slave
+    hostname: order-db-slave
+    depends_on:
+      - order-db
+    ports:
+      - "6382:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "redis",
+        "--maxmemory",
+        "512mb",
+        "--appendonly",
+        "yes",
+        "--replicaof",
+        "order-db",
+        "6379",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--replica-announce-port",
+        "6382",
+        "--protected-mode",
+        "no",
+        "--masterauth",
+        "redis"
+      ]
+    networks:
+      - order-net
 
   stock-db:
     image: redis:7.2-bookworm
@@ -125,70 +192,169 @@ services:
     networks:
       - stock-net
 
+  payment-db:
+    image: redis:7.2-bookworm
+    container_name: payment-db
+    hostname: payment-db
+    ports:
+      - "6383:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "redis",
+        "--maxmemory",
+        "512mb",
+        "--replica-announce-port",
+        "6383",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--protected-mode",
+        "no",
+        "--masterauth",
+        "redis"
+      ]
+    networks:
+      - payment-net
+
+  payment-db-slave:
+    image: redis:7.2-bookworm
+    container_name: payment-db-slave
+    hostname: payment-db-slave
+    depends_on:
+      - payment-db
+    ports:
+      - "6384:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "redis",
+        "--maxmemory",
+        "512mb",
+        "--appendonly",
+        "yes",
+        "--replicaof",
+        "payment-db",
+        "6379",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--replica-announce-port",
+        "6384",
+        "--protected-mode",
+        "no",
+        "--masterauth",
+        "redis"
+      ]
+    networks:
+      - payment-net
+
   sentinel-1:
     image: redis:7.2-bookworm
     container_name: sentinel-1
     hostname: sentinel-1
     depends_on:
+      - order-db
       - stock-db
+      - payment-db
     ports:
       - "26379:26379"
     command: >
       sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
-            echo "sentinel monitor mymaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
-            echo "sentinel auth-pass mymaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel monitor stockmaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass stockmaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel monitor ordermaster ${HOST_IP} 6381 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass ordermaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&  
+            echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf && 
             echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds mymaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel failover-timeout mymaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel parallel-syncs mymaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds stockmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout stockmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs stockmaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds ordermaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout ordermaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs ordermaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds paymentmaster 10000" >> /etc/sentinel.conf && 
+            echo "sentinel failover-timeout paymentmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs paymentmaster 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
     networks:
+      - order-net
       - stock-net
+      - payment-net
 
   sentinel-2:
     image: redis:7.2-bookworm
     container_name: sentinel-2
     hostname: sentinel-2
     depends_on:
+      - order-db
       - stock-db
+      - payment-db
     ports:
       - "26380:26379"
     command: >
       sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
-            echo "sentinel monitor mymaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
-            echo "sentinel auth-pass mymaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel monitor stockmaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass stockmaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel monitor ordermaster ${HOST_IP} 6381 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass ordermaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&  
+            echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf && 
             echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds mymaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel failover-timeout mymaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel parallel-syncs mymaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds stockmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout stockmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs stockmaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds ordermaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout ordermaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs ordermaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds paymentmaster 10000" >> /etc/sentinel.conf && 
+            echo "sentinel failover-timeout paymentmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs paymentmaster 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
     networks:
+      - order-net
       - stock-net
+      - payment-net
 
   sentinel-3:
     image: redis:7.2-bookworm
     container_name: sentinel-3
     hostname: sentinel-3
     depends_on:
+      - order-db
       - stock-db
+      - payment-db
     ports:
       - "26381:26379"
     command: >
       sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
-            echo "sentinel monitor mymaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
-            echo "sentinel auth-pass mymaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel monitor stockmaster ${HOST_IP} 6379 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass stockmaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel monitor ordermaster ${HOST_IP} 6381 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass ordermaster redis" >> /etc/sentinel.conf &&
+            echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&
+            echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf &&  
             echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds mymaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel failover-timeout mymaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel parallel-syncs mymaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds stockmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout stockmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs stockmaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds ordermaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout ordermaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs ordermaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds paymentmaster 10000" >> /etc/sentinel.conf &&  
+            echo "sentinel failover-timeout paymentmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs paymentmaster 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
     networks:
+      - order-net
       - stock-net
-
-  payment-db:
-    image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+      - payment-net
 
 networks:
   stock-net:
+    driver: bridge
+  order-net:
+    driver: bridge
+  payment-net:
     driver: bridge
