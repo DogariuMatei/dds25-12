@@ -42,15 +42,15 @@ spec:
             - containerPort: 5000
           env:
             - name: REDIS_HOST
-              value: redis-master
+              value: payment-db-redis-master
             - name: REDIS_PORT
               value: '6379'
             - name: REDIS_PASSWORD
               value: "redis"
             - name: REDIS_DB
-              value: "3"
+              value: "0"
             - name: EVENT_REDIS_HOST
-              value: event-redis-master
+              value: event-db-redis-master
             - name: EVENT_REDIS_PORT
               value: '6379'
             - name: EVENT_REDIS_PASSWORD

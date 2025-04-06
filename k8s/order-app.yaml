@@ -46,15 +46,15 @@ spec:
             - name: STOCK_SERVICE_URL
               value: "stock-service"
             - name: REDIS_HOST
-              value: redis-master
+              value: order-db-redis-master
             - name: REDIS_PORT
               value: '6379'
             - name: REDIS_PASSWORD
               value: "redis"
             - name: REDIS_DB
-              value: "1"
+              value: "0"
             - name: EVENT_REDIS_HOST
-              value: event-redis-master
+              value: event-db-redis-master
             - name: EVENT_REDIS_PORT
               value: '6379'
             - name: EVENT_REDIS_PASSWORD
