@@ -21,9 +21,10 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
-default_producer_config = {'bootstrap.servers': 'kafka:9092'}
+KAFKA_URL = os.environ['KAFKA_URL']
+default_producer_config = {'bootstrap.servers': KAFKA_URL}
 default_consumer_config = {
-    'bootstrap.servers': 'kafka:9092',
+    'bootstrap.servers': KAFKA_URL,
     # 'auto.offset.reset': 'earliest', #'smallest'
     'auto.offset.reset': 'latest', #'smallest'
     'enable.auto.commit': 'false',
@@ -174,7 +175,7 @@ def start_order_consumer(): # TODO not only created.
         items_quantities: dict[str, int] = defaultdict(int)
         for item_id, quantity in order_entry.items:
             items_quantities[item_id] += quantity
-        logs_id = f"logs{order_entry.event_id}"
+        logs_id = f"stocklogs{order_entry.event_id}"
         log_type = db.get(logs_id)
         if log_type:
             return
@@ -231,7 +232,7 @@ def start_payment_consumer():
         items_quantities: dict[str, int] = defaultdict(int)
         for item_id, quantity in order_entry.items:
             items_quantities[item_id] += quantity
-        logs_id = f"logs{order_entry.event_id}"
+        logs_id = f"stocklogs{order_entry.event_id}"
         log_type = db.get(logs_id)
         app.logger.info(f"{order_entry.event_id} {log_type} {log_type != "SUBTRACTED"}")
         if log_type != b"SUBTRACTED":

@@ -129,7 +129,7 @@ services:
     build: ./order
     image: order:latest
     environment:
-      - GATEWAY_URL=http://gateway:80
+      - STOCK_URL=http://stock-service:5000
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env

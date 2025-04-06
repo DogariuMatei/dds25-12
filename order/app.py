@@ -19,7 +19,8 @@ from redis.client import Pipeline
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
-GATEWAY_URL = os.environ['GATEWAY_URL']
+STOCK_URL = os.environ['STOCK_URL']
+KAFKA_URL = os.environ['KAFKA_URL']
 app = Flask("order-service")
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
@@ -29,9 +30,9 @@ event_db: redis.Redis = redis.Redis(host=os.environ['EVENT_REDIS_HOST'],
                                     port=int(os.environ['REDIS_PORT']),
                                     password=os.environ['REDIS_PASSWORD'],
                                     db=int(os.environ['REDIS_DB']))
-default_producer_config = {'bootstrap.servers': 'kafka:9092'}
+default_producer_config = {'bootstrap.servers': KAFKA_URL}
 default_consumer_config = {
-    'bootstrap.servers': 'kafka:9092',
+    'bootstrap.servers': KAFKA_URL,
     # 'auto.offset.reset': 'earliest', #'smallest'
     'auto.offset.reset': 'latest', #'smallest'
     'enable.auto.commit': 'false',
@@ -137,7 +138,7 @@ def send_get_request(url: str):
 @app.post('/addItem/<order_id>/<item_id>/<quantity>') # TODO ASSUMPTION (according to benchmark, test): no items are added to order after first attempt to checkout. No items are added to paid order.
 def add_item(order_id: str, item_id: str, quantity: int):
     order_entry: OrderValue = get_order_from_db(order_id)
-    item_reply = send_get_request(f"{GATEWAY_URL}/stock/find/{item_id}")
+    item_reply = send_get_request(f"{STOCK_URL}/find/{item_id}")
     if item_reply.status_code != 200:
         abort(400, f"Item: {item_id} does not exist!")
     item_json: dict = item_reply.json()
@@ -217,7 +218,7 @@ def start_payment_consumer():
 
     def execution_function(msg):
         order_entry = msgpack.decode(msg.value(), type=OrderDto)
-        logs_id = f"logs{order_entry.event_id}"
+        logs_id = f"orderlogs{order_entry.event_id}"
         if order_entry.event_type == "SUCCESS":
             log_type = db.get(logs_id)
             if not log_type:

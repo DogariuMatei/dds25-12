@@ -19,14 +19,15 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
+KAFKA_URL = os.environ['KAFKA_URL']
 default_consumer_config = {
-    'bootstrap.servers': 'kafka:9092',
+    'bootstrap.servers': KAFKA_URL,
     # 'auto.offset.reset': 'earliest', #'smallest'
     'auto.offset.reset': 'latest', #'smallest'
     'enable.auto.commit': 'false',
     # 'enable.auto.offset.store': 'false'
 }
-default_producer_config = {'bootstrap.servers': 'kafka:9092'}
+default_producer_config = {'bootstrap.servers': KAFKA_URL}
 producer = Producer(default_producer_config)
 
 def close_db_connection():
@@ -168,7 +169,7 @@ def start_stock_consumer():
         if order_entry.event_type != 'SUCCESS':
             return
         app.logger.info(f"Processing stock event: {order_entry.event_type}")
-        logs_id = f"logs{order_entry.event_id}"
+        logs_id = f"paymentlogs{order_entry.event_id}"
         user_id = order_entry.user_id
         log_type = db.get(logs_id)
         if log_type:

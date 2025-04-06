@@ -28,6 +28,7 @@ spec:
       containers:
         - name: order
           image: order:latest
+          imagePullPolicy: Never
           resources:
             limits:
               memory: "1Gi"
@@ -45,10 +46,16 @@ spec:
             - name: STOCK_SERVICE_URL
               value: "stock-service"
             - name: REDIS_HOST
-              value: redis-master
+              value: redis-master.default.svc.cluster.local
             - name: REDIS_PORT
               value: '6379'
             - name: REDIS_PASSWORD
               value: "redis"
             - name: REDIS_DB
               value: "0"
+            - name: EVENT_REDIS_HOST
+              value: redis-master.default.svc.cluster.local
+            - name: STOCK_URL
+              value: http://stock-service:5000
+            - name: KAFKA_URL
+              value: my-release-kafka.default.svc.cluster.local:9092
