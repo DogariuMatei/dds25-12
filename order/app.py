@@ -37,10 +37,10 @@ db: redis.Redis = redis.Redis( host=os.environ['REDIS_HOST'],
                                password=os.environ['REDIS_PASSWORD'],
                                db=int(os.environ['REDIS_DB']))
 
-event_db: redis.Redis = redis.Redis( host=os.environ.get('EVENT_REDIS_HOST', 'localhost'),
-                        port=int(os.environ.get('REDIS_PORT', 6379)),
-                        password=os.environ.get('REDIS_PASSWORD', ''),
-                        db=int(os.environ.get('REDIS_DB', 0)))
+event_db: redis.Redis = redis.Redis( host=os.environ['EVENT_REDIS_HOST'],
+                        port=int(os.environ['EVENT_REDIS_PORT']),
+                        password=os.environ['EVENT_REDIS_PASSWORD'],
+                        db=int(os.environ['EVENT_REDIS_DB']))
 
 def close_db_connection():
     db.close()
@@ -232,9 +232,11 @@ def checkout(order_id: str):
             result = json.loads(message_data[b'result'].decode())
             if result.get('status') == "success":
                 event_db.delete(response_stream)
+                app.logger.info(f"Checkout successful: {result.get('reason')}")
                 return Response(f"Checkout successful: {result.get('reason')}", status=200)
             else:
                 event_db.delete(response_stream)
+                app.logger.info(f"Checkout FAILED: {result.get('reason')}")
                 return abort(400, result.get('reason'))
 
     event_db.delete(response_stream)

@@ -3,12 +3,13 @@ You need `minikube` and `kubectl` installed locally
 ```
 minikube start --driver=docker
 ```
+```
+minikube addons enable metrics-server
+minikube addons enable ingress
+```
 Run this: `deploy-charts-minicube.sh` (its in the root directory of the project)
 ```
 eval $(minikube docker-env)
-```
-```
-minikube addons enable ingress
 ```
 ```
 docker build -t order:latest ./order

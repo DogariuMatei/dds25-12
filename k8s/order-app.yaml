@@ -16,7 +16,7 @@ kind: Deployment
 metadata:
   name: order-deployment
 spec:
-  replicas: 1
+  replicas: 6
   selector:
     matchLabels:
       component: order
@@ -32,10 +32,10 @@ spec:
           resources:
             limits:
               memory: "1Gi"
-              cpu: "1"
+              cpu: "500m"
             requests:
               memory: "1Gi"
-              cpu: "1"
+              cpu: "500m"
           command: ["gunicorn"]
           args: ["-b", "0.0.0.0:5000", "app:app"]
           ports:
@@ -52,8 +52,14 @@ spec:
             - name: REDIS_PASSWORD
               value: "redis"
             - name: REDIS_DB
-              value: "0"
+              value: "1"
             - name: EVENT_REDIS_HOST
-              value: redis-master
+              value: event-redis-master
+            - name: EVENT_REDIS_PORT
+              value: '6379'
+            - name: EVENT_REDIS_PASSWORD
+              value: "redis"
+            - name: EVENT_REDIS_DB
+              value: "0"
             - name: GATEWAY_URL
               value: "http://ingress-nginx-controller.ingress-nginx"
