@@ -16,7 +16,7 @@ kind: Deployment
 metadata:
   name: order-deployment
 spec:
-  replicas: 6
+  replicas: 4
   selector:
     matchLabels:
       component: order

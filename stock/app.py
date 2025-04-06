@@ -167,6 +167,31 @@ def get_item_from_db(item_id: str) -> StockValue | None:
     return entry
 
 
+def get_items_from_db(item_ids):
+    """
+    Get items from the database in a single operation
+    """
+    if not item_ids:
+        return {}
+
+    try:
+        pipe = db.pipeline(transaction=False)
+        for item_id in item_ids:
+            pipe.get(item_id)
+
+        results = pipe.execute()
+        items = {}
+
+        for i, item_id in enumerate(item_ids):
+            entry = results[i]
+            items[item_id] = msgpack.decode(entry, type=StockValue)
+
+        return items
+    except redis.exceptions.RedisError as e:
+        app.logger.error(f"DB error when getting multiple items: {e}")
+        abort(400, DB_ERROR_STR)
+
+
 @app.post('/item/create/<price>')
 def create_item(price: int):
     key = str(uuid.uuid4())
@@ -236,8 +261,12 @@ def make_reservations(items):
     success = True
     failed_items = []
     pipe = db.pipeline(transaction=True)
-    item_entries = {}
 
+    item_ids = [item.get('item_id') for item in items if item.get('item_id') and item.get('amount')]
+
+    item_entries_dict = get_items_from_db(item_ids)
+
+    item_updates = {}
     for item in items:
         item_id = item.get('item_id')
         amount = item.get('amount')
@@ -247,14 +276,20 @@ def make_reservations(items):
 
         try:
             amount = int(amount)
-            item_entry = get_item_from_db(item_id)
+
+            if item_id not in item_entries_dict:
+                failed_items.append(item_id)
+                success = False
+                break
+
+            item_entry = item_entries_dict[item_id]
 
             if item_entry.stock - item_entry.reserved < amount:
                 failed_items.append(item_id)
                 success = False
                 break
 
-            item_entries[item_id] = {
+            item_updates[item_id] = {
                 'entry': item_entry,
                 'amount': amount
             }
@@ -267,7 +302,7 @@ def make_reservations(items):
 
     if success:
         try:
-            for item_id, data in item_entries.items():
+            for item_id, data in item_updates.items():
                 item_entry = data['entry']
                 amount = data['amount']
 
@@ -294,8 +329,12 @@ def release_reservations(items):
     success = True
     failed_items = []
     pipe = db.pipeline(transaction=True)
-    item_entries = {}
 
+    item_ids = [item.get('item_id') for item in items if item.get('item_id') and item.get('amount')]
+
+    item_entries_dict = get_items_from_db(item_ids)
+
+    item_updates = {}
     for item in items:
         item_id = item.get('item_id')
         amount = item.get('amount')
@@ -305,9 +344,15 @@ def release_reservations(items):
 
         try:
             amount = int(amount)
-            item_entry = get_item_from_db(item_id)
 
-            item_entries[item_id] = {
+            if item_id not in item_entries_dict:
+                failed_items.append(item_id)
+                success = False
+                break
+
+            item_entry = item_entries_dict[item_id]
+
+            item_updates[item_id] = {
                 'entry': item_entry,
                 'amount': amount
             }
@@ -320,7 +365,7 @@ def release_reservations(items):
 
     if success:
         try:
-            for item_id, data in item_entries.items():
+            for item_id, data in item_updates.items():
                 item_entry = data['entry']
                 amount = data['amount']
 
@@ -350,8 +395,12 @@ def confirm_reservations(items):
     success = True
     failed_items = []
     pipe = db.pipeline(transaction=True)
-    item_entries = {}
 
+    item_ids = [item.get('item_id') for item in items if item.get('item_id') and item.get('amount')]
+
+    item_entries_dict = get_items_from_db(item_ids)
+
+    item_updates = {}
     for item in items:
         item_id = item.get('item_id')
         amount = item.get('amount')
@@ -361,14 +410,20 @@ def confirm_reservations(items):
 
         try:
             amount = int(amount)
-            item_entry = get_item_from_db(item_id)
+
+            if item_id not in item_entries_dict:
+                failed_items.append(item_id)
+                success = False
+                break
+
+            item_entry = item_entries_dict[item_id]
 
             if item_entry.reserved < amount:
                 failed_items.append(item_id)
                 success = False
                 break
 
-            item_entries[item_id] = {
+            item_updates[item_id] = {
                 'entry': item_entry,
                 'amount': amount
             }
@@ -381,7 +436,7 @@ def confirm_reservations(items):
 
     if success:
         try:
-            for item_id, data in item_entries.items():
+            for item_id, data in item_updates.items():
                 item_entry = data['entry']
                 amount = data['amount']
 
