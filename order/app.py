@@ -224,7 +224,7 @@ def checkout(order_id: str):
     start_time = time.time()
 
     while time.time() - start_time < timeout:
-        messages = event_db.xread({response_stream: '0'}, count=1)
+        messages = event_db.xread({response_stream: '0'}, count=1, block=50)
 
         if messages:
             stream_name, stream_messages = messages[0]

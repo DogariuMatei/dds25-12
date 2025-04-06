@@ -16,7 +16,7 @@ kind: Deployment
 metadata:
   name: stock-deployment
 spec:
-  replicas: 2
+  replicas: 4
   selector:
     matchLabels:
       component: stock
@@ -31,10 +31,10 @@ spec:
           imagePullPolicy: Never
           resources:
             limits:
-              memory: "1Gi"
+              memory: "100Mi"
               cpu: "500m"
             requests:
-              memory: "1Gi"
+              memory: "100Mi"
               cpu: "500m"
           command: ["gunicorn"]
           args: ["-b", "0.0.0.0:5000", "app:app"]
@@ -42,7 +42,7 @@ spec:
             - containerPort: 5000
           env:
             - name: REDIS_HOST
-              value: stock-db-redis-master
+              value: db-stock-redis-master
             - name: REDIS_PORT
               value: '6379'
             - name: REDIS_PASSWORD
@@ -50,7 +50,7 @@ spec:
             - name: REDIS_DB
               value: "0"
             - name: EVENT_REDIS_HOST
-              value: event-db-redis-master
+              value: db-event-redis-master
             - name: EVENT_REDIS_PORT
               value: '6379'
             - name: EVENT_REDIS_PASSWORD

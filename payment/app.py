@@ -319,6 +319,14 @@ def process_stock_events():
 
                             except Exception as e:
                                 reason = f"Error processing payment: {e}"
+                                publish_event(PAYMENT_EVENTS, PAYMENT_FAILED, {
+                                    "order_id": order_id,
+                                    "user_id": user_id,
+                                    "transaction_id": transaction_id,
+                                    "items": items,
+                                    "total_cost": total_cost,
+                                    "response_stream": response_stream
+                                })
                                 add_to_response_stream(response_stream, order_id, "failed", reason)
 
 

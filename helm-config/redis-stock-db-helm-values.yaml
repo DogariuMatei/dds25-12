@@ -6,7 +6,7 @@ master:
   resources:
     requests:
       memory: 1Gi
-      cpu: 1000m
+      cpu: 500m
 replica:
   replicaCount: 1
   persistence:
@@ -14,4 +14,4 @@ replica:
   resources:
     requests:
       memory: 1Gi
-      cpu: 300m
+      cpu: 200m
