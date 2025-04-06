@@ -231,11 +231,12 @@ def remove_stock(item_id: str, amount: int):
 @two_phase_locking
 def make_reservations(items):
     """
-    Make reservations for multiple items in a batch.
-    Each item should be a dict with 'item_id' and 'amount' keys.
+    Make reservations for multiple items using Redis Pipeline.
     """
     success = True
     failed_items = []
+    pipe = db.pipeline(transaction=True)
+    item_entries = {}
 
     for item in items:
         item_id = item.get('item_id')
@@ -248,28 +249,38 @@ def make_reservations(items):
             amount = int(amount)
             item_entry = get_item_from_db(item_id)
 
-            # Check stock availability
             if item_entry.stock - item_entry.reserved < amount:
                 failed_items.append(item_id)
                 success = False
                 break
 
-            # Reserve the stock
-            item_entry.reserved += amount
-
-            try:
-                db.set(item_id, msgpack.encode(item_entry))
-            except redis.exceptions.RedisError as e:
-                app.logger.error(f"DB error when making reservation: {e}")
-                failed_items.append(item_id)
-                success = False
-                break
+            item_entries[item_id] = {
+                'entry': item_entry,
+                'amount': amount
+            }
 
         except Exception as e:
             app.logger.error(f"Error processing reservation for item {item_id}: {e}")
             failed_items.append(item_id)
             success = False
             break
+
+    if success:
+        try:
+            for item_id, data in item_entries.items():
+                item_entry = data['entry']
+                amount = data['amount']
+
+                item_entry.reserved += amount
+
+                pipe.set(item_id, msgpack.encode(item_entry))
+
+            pipe.execute()
+        except redis.exceptions.RedisError as e:
+            app.logger.error(f"Redis pipeline error when making reservations: {e}")
+            success = False
+            message = f"Failed to reserve items due to database error"
+            return success, message
 
     message = "All reservations completed successfully" if success else f"Failed to reserve items: {', '.join(failed_items)}"
     return success, message
@@ -278,11 +289,12 @@ def make_reservations(items):
 @two_phase_locking
 def release_reservations(items):
     """
-    Release reservations for multiple items in a batch.
-    Each item should be a dict with 'item_id' and 'amount' keys.
+    Release reservations for multiple items using Redis Pipeline.
     """
     success = True
     failed_items = []
+    pipe = db.pipeline(transaction=True)
+    item_entries = {}
 
     for item in items:
         item_id = item.get('item_id')
@@ -295,18 +307,10 @@ def release_reservations(items):
             amount = int(amount)
             item_entry = get_item_from_db(item_id)
 
-            if item_entry.reserved < amount:
-                item_entry.reserved = 0
-            else:
-                item_entry.reserved -= amount
-
-            try:
-                db.set(item_id, msgpack.encode(item_entry))
-            except redis.exceptions.RedisError as e:
-                app.logger.error(f"DB error when releasing reservation: {e}")
-                failed_items.append(item_id)
-                success = False
-                break
+            item_entries[item_id] = {
+                'entry': item_entry,
+                'amount': amount
+            }
 
         except Exception as e:
             app.logger.error(f"Error processing reservation release for item {item_id}: {e}")
@@ -314,14 +318,39 @@ def release_reservations(items):
             success = False
             break
 
+    if success:
+        try:
+            for item_id, data in item_entries.items():
+                item_entry = data['entry']
+                amount = data['amount']
+
+                if item_entry.reserved < amount:
+                    item_entry.reserved = 0
+                else:
+                    item_entry.reserved -= amount
+
+                pipe.set(item_id, msgpack.encode(item_entry))
+
+            pipe.execute()
+        except redis.exceptions.RedisError as e:
+            app.logger.error(f"Redis pipeline error when releasing reservations: {e}")
+            success = False
+            message = f"Failed to release reservations due to database error"
+            return success, message
+
     message = "All reservations released successfully" if success else f"Failed to release reservations for items: {', '.join(failed_items)}"
     return success, message
 
 
 @two_phase_locking
 def confirm_reservations(items):
-    """Confirm reservations for multiple items in a single transaction"""
+    """
+    Confirm reservations for multiple items using Redis Pipeline.
+    """
     success = True
+    failed_items = []
+    pipe = db.pipeline(transaction=True)
+    item_entries = {}
 
     for item in items:
         item_id = item.get('item_id')
@@ -331,29 +360,45 @@ def confirm_reservations(items):
             continue
 
         try:
-            item_entry = get_item_from_db(item_id)
             amount = int(amount)
+            item_entry = get_item_from_db(item_id)
 
             if item_entry.reserved < amount:
+                failed_items.append(item_id)
                 success = False
                 break
 
-            # Actually subtract from stock and reduce reservation
-            item_entry.stock -= amount
-            item_entry.reserved -= amount
+            item_entries[item_id] = {
+                'entry': item_entry,
+                'amount': amount
+            }
 
-            try:
-                db.set(item_id, msgpack.encode(item_entry))
-            except redis.exceptions.RedisError as e:
-                app.logger.error(f"DB error when confirming reservation: {e}")
-                success = False
-                break
         except Exception as e:
             app.logger.error(f"Error processing item {item_id}: {e}")
+            failed_items.append(item_id)
             success = False
             break
 
-    return success, "Stock reservations processed successfully" if success else "Failed to process reservations"
+    if success:
+        try:
+            for item_id, data in item_entries.items():
+                item_entry = data['entry']
+                amount = data['amount']
+
+                item_entry.stock -= amount
+                item_entry.reserved -= amount
+
+                pipe.set(item_id, msgpack.encode(item_entry))
+
+            pipe.execute()
+        except redis.exceptions.RedisError as e:
+            app.logger.error(f"Redis pipeline error when confirming reservations: {e}")
+            success = False
+            message = "Failed to process reservations due to database error"
+            return success, message
+
+    message = "Stock reservations processed successfully" if success else f"Failed to process reservations: {', '.join(failed_items)}"
+    return success, message
 
 
 def process_order_events():
