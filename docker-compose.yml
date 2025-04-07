@@ -3,7 +3,59 @@ services:
 
   event-bus:
     image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+    ports:
+      - "6385:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "redis",
+        "--maxmemory",
+        "512mb",
+        "--replica-announce-port",
+        "6385",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--protected-mode",
+        "no",
+        "--masterauth",
+        "redis"
+      ]
+    networks:
+      - default
+      - event-net
+
+  event-bus-slave:
+    image: redis:7.2-bookworm
+    container_name: event-bus-slave
+    hostname: event-bus-slave
+    depends_on:
+      - event-bus
+    ports:
+      - "6386:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "redis",
+        "--maxmemory",
+        "512mb",
+        "--appendonly",
+        "yes",
+        "--replicaof",
+        "event-bus",
+        "6379",
+        "--replica-announce-ip",
+        "${HOST_IP}",
+        "--replica-announce-port",
+        "6386",
+        "--protected-mode",
+        "no",
+        "--masterauth",
+        "redis"
+      ]
+    networks:
+      - event-net
 
   gateway:
     image: nginx:1.25-bookworm
@@ -267,6 +319,8 @@ services:
             echo "sentinel auth-pass ordermaster redis" >> /etc/sentinel.conf &&
             echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&  
             echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf && 
+            echo "sentinel monitor eventmaster ${HOST_IP} 6385 2" >> /etc/sentinel.conf &&  
+            echo "sentinel auth-pass eventmaster redis" >> /etc/sentinel.conf && 
             echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
             echo "sentinel down-after-milliseconds stockmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel failover-timeout stockmaster 3000" >> /etc/sentinel.conf &&
@@ -277,11 +331,15 @@ services:
             echo "sentinel down-after-milliseconds paymentmaster 3000" >> /etc/sentinel.conf && 
             echo "sentinel failover-timeout paymentmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs paymentmaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds eventmaster 3000" >> /etc/sentinel.conf && 
+            echo "sentinel failover-timeout eventmaster 3000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs eventmaster 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
     networks:
       - order-net
       - stock-net
       - payment-net
+      - event-net
 
   sentinel-2:
     image: redis:7.2-bookworm
@@ -301,6 +359,8 @@ services:
             echo "sentinel auth-pass ordermaster redis" >> /etc/sentinel.conf &&
             echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&  
             echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf && 
+            echo "sentinel monitor eventmaster ${HOST_IP} 6385 2" >> /etc/sentinel.conf &&  
+            echo "sentinel auth-pass eventmaster redis" >> /etc/sentinel.conf && 
             echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
             echo "sentinel down-after-milliseconds stockmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel failover-timeout stockmaster 3000" >> /etc/sentinel.conf &&
@@ -311,11 +371,15 @@ services:
             echo "sentinel down-after-milliseconds paymentmaster 3000" >> /etc/sentinel.conf && 
             echo "sentinel failover-timeout paymentmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs paymentmaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds eventmaster 3000" >> /etc/sentinel.conf && 
+            echo "sentinel failover-timeout eventmaster 3000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs eventmaster 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
     networks:
       - order-net
       - stock-net
       - payment-net
+      - event-net
 
   sentinel-3:
     image: redis:7.2-bookworm
@@ -333,8 +397,10 @@ services:
             echo "sentinel auth-pass stockmaster redis" >> /etc/sentinel.conf &&
             echo "sentinel monitor ordermaster ${HOST_IP} 6381 2" >> /etc/sentinel.conf &&
             echo "sentinel auth-pass ordermaster redis" >> /etc/sentinel.conf &&
-            echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&
-            echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf &&  
+            echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&  
+            echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf && 
+            echo "sentinel monitor eventmaster ${HOST_IP} 6385 2" >> /etc/sentinel.conf &&  
+            echo "sentinel auth-pass eventmaster redis" >> /etc/sentinel.conf && 
             echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
             echo "sentinel down-after-milliseconds stockmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel failover-timeout stockmaster 3000" >> /etc/sentinel.conf &&
@@ -342,14 +408,18 @@ services:
             echo "sentinel down-after-milliseconds ordermaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel failover-timeout ordermaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs ordermaster 1" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds paymentmaster 3000" >> /etc/sentinel.conf &&  
+            echo "sentinel down-after-milliseconds paymentmaster 3000" >> /etc/sentinel.conf && 
             echo "sentinel failover-timeout paymentmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs paymentmaster 1" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds eventmaster 3000" >> /etc/sentinel.conf && 
+            echo "sentinel failover-timeout eventmaster 3000" >> /etc/sentinel.conf &&
+            echo "sentinel parallel-syncs eventmaster 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
     networks:
       - order-net
       - stock-net
       - payment-net
+      - event-net
 
   watchdog1:
     image: alpine:latest
@@ -378,7 +448,7 @@ services:
       sh -c '
         apk add --no-cache docker docker-compose && 
         while true; do
-          docker-compose -p dds25-12 -f /root/docker-compose.yml up -d --no-recreate watchdog1 order-db order-db-slave payment-db payment-db-slave stock-db stock-db-slave &&
+          docker-compose -p dds25-12 -f /root/docker-compose.yml up -d --no-recreate watchdog1 order-db order-db-slave payment-db payment-db-slave stock-db stock-db-slave event-bus event-bus-slave &&
           sleep 10
         done
       '
@@ -389,4 +459,6 @@ networks:
   order-net:
     driver: bridge
   payment-net:
+    driver: bridge
+  event-net:
     driver: bridge
