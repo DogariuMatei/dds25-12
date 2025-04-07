@@ -268,14 +268,14 @@ services:
             echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&  
             echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf && 
             echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds stockmaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel failover-timeout stockmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds stockmaster 3000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout stockmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs stockmaster 1" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds ordermaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel failover-timeout ordermaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds ordermaster 3000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout ordermaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs ordermaster 1" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds paymentmaster 10000" >> /etc/sentinel.conf && 
-            echo "sentinel failover-timeout paymentmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds paymentmaster 3000" >> /etc/sentinel.conf && 
+            echo "sentinel failover-timeout paymentmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs paymentmaster 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
     networks:
@@ -302,14 +302,14 @@ services:
             echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&  
             echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf && 
             echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds stockmaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel failover-timeout stockmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds stockmaster 3000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout stockmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs stockmaster 1" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds ordermaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel failover-timeout ordermaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds ordermaster 3000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout ordermaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs ordermaster 1" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds paymentmaster 10000" >> /etc/sentinel.conf && 
-            echo "sentinel failover-timeout paymentmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds paymentmaster 3000" >> /etc/sentinel.conf && 
+            echo "sentinel failover-timeout paymentmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs paymentmaster 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
     networks:
@@ -336,20 +336,52 @@ services:
             echo "sentinel monitor paymentmaster ${HOST_IP} 6383 2" >> /etc/sentinel.conf &&
             echo "sentinel auth-pass paymentmaster redis" >> /etc/sentinel.conf &&  
             echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds stockmaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel failover-timeout stockmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds stockmaster 3000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout stockmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs stockmaster 1" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds ordermaster 10000" >> /etc/sentinel.conf &&
-            echo "sentinel failover-timeout ordermaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds ordermaster 3000" >> /etc/sentinel.conf &&
+            echo "sentinel failover-timeout ordermaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs ordermaster 1" >> /etc/sentinel.conf &&
-            echo "sentinel down-after-milliseconds paymentmaster 10000" >> /etc/sentinel.conf &&  
-            echo "sentinel failover-timeout paymentmaster 10000" >> /etc/sentinel.conf &&
+            echo "sentinel down-after-milliseconds paymentmaster 3000" >> /etc/sentinel.conf &&  
+            echo "sentinel failover-timeout paymentmaster 3000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs paymentmaster 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
     networks:
       - order-net
       - stock-net
       - payment-net
+
+  watchdog1:
+    image: alpine:latest
+    container_name: watchdog1
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PROJECT_DIR}:/root
+    command: >
+      sh -c '
+        apk add --no-cache docker docker-compose && 
+        while true; do
+          docker-compose -p dds25-12 -f /root/docker-compose.yml up -d --no-recreate watchdog2 order-service payment-service stock-service gateway sentinel-1 sentinel-2 sentinel-3 &&
+          sleep 10
+        done
+      '
+
+  watchdog2:
+    image: alpine:latest
+    container_name: watchdog2
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PROJECT_DIR}:/root
+    command: >
+      sh -c '
+        apk add --no-cache docker docker-compose && 
+        while true; do
+          docker-compose -p dds25-12 -f /root/docker-compose.yml up -d --no-recreate watchdog1 order-db order-db-slave payment-db payment-db-slave stock-db stock-db-slave &&
+          sleep 10
+        done
+      '
 
 networks:
   stock-net:
