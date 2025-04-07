@@ -468,7 +468,7 @@ def process_order_events():
                 consumer_name,
                 {ORDER_EVENTS: '>'},
                 count=1,
-                block=5000
+                block=500
             )
 
             if not message:
@@ -532,7 +532,7 @@ def process_payment_events():
                 consumer_name,
                 {PAYMENT_EVENTS: '>'},
                 count=1,
-                block=5000
+                block=500
             )
 
             if not messages:

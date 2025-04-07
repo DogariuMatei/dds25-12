@@ -274,7 +274,7 @@ def process_stock_events():
                 consumer_name,
                 {STOCK_EVENTS: '>'},
                 count=1,
-                block=5000
+                block=500
             )
 
             if not messages:
