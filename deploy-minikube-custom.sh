@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
+minikube delete
 minikube start
+
 
 minikube addons enable metrics-server
 minikube addons enable ingress
