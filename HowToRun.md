@@ -14,7 +14,7 @@ minikube start --driver=docker
 minikube addons enable metrics-server
 minikube addons enable ingress
 ```
-Run this: `deploy-charts-minicube.sh` (its in the root directory of the project)
+Run this: `deploy-charts-minikube.sh` (its in the root directory of the project)
 ```
 eval $(minikube docker-env)
 ```
