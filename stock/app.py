@@ -440,14 +440,6 @@ def process_payment_events():
                         if log_type == b"SUBTRACTED":
                             release_reservations(items, logs_id)
 
-                        add_to_response_stream(response_stream, order_id, "failed")
-
-                    elif event_type == PAYMENT_SUCCEEDED:
-                        order_id = event_data.get('order_id')
-                        response_stream = event_data.get('response_stream')
-
-                        reason = "Stock reservation OK, payment OK, stock confirmation OK"
-                        add_to_response_stream(response_stream, order_id, "success", reason)
                     db.xack(stream_name, STOCK_PAYMENT_GROUP, message_id)
 
         except Exception as e:

@@ -50,6 +50,14 @@ atexit.register(close_db_connection)
 class UserValue(Struct):
     credit: int
 
+def add_to_response_stream(response_stream, order_id, status, reason=None):
+    event_db.xadd(response_stream, {
+        b'result': json.dumps({
+            "status": status,
+            "reason": reason,
+            "order_id": order_id,
+        }).encode()
+    })
 
 def publish_event(stream, event_type, data):
     """Publish an event to a Redis Stream"""
@@ -259,6 +267,7 @@ def process_stock_events():
                         log_type = db.get(logs_id)
                         payment_result = remove_credit_async(user_id, int(total_cost), logs_id) if not log_type else True
                         if not payment_result:
+                            add_to_response_stream(response_stream, order_id, "failed")
                             publish_event(PAYMENT_EVENTS, PAYMENT_FAILED, {
                                 "order_id": order_id,
                                 "user_id": user_id,
@@ -268,16 +277,7 @@ def process_stock_events():
                                 "response_stream": response_stream
                             })
                         else:
-                            # Publish payment success event
-                            publish_event(PAYMENT_EVENTS, PAYMENT_SUCCEEDED, {
-                                "user_id": user_id,
-                                "transaction_id": transaction_id,
-                                "order_id": order_id,
-                                "items": items,
-                                "total_cost": total_cost,
-                                "response_stream": response_stream
-                            })
-
+                            add_to_response_stream(response_stream, order_id, "success", "OK")
 
                     # Acknowledge the message
                     db.xack(stream_name, PAYMENT_STOCK_GROUP, message_id)
