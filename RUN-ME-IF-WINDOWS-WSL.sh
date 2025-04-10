@@ -23,14 +23,12 @@ helm install -f helm-config/redis-events-helm-values.yaml db-event bitnami/redis
 
 kubectl apply -f ./k8s
 
-echo "Minikube IP address:"
-minikube ip
-echo "PLEASE PASTE THIS IP: $(minikube ip) IN THE WDM-Benchmark tool's urls.json file!!!!!!"
-echo "PLEASE PASTE THIS IP: $(minikube ip) IN THE WDM-Benchmark tool's urls.json file!!!!!!"
-echo "PLEASE PASTE THIS IP: $(minikube ip) IN THE WDM-Benchmark tool's urls.json file!!!!!!"
-echo "PLEASE PASTE THIS IP: $(minikube ip) IN THE WDM-Benchmark tool's urls.json file!!!!!!"
-echo "PLEASE PASTE THIS IP: $(minikube ip) IN THE WDM-Benchmark tool's urls.json file!!!!!!"
+kubectl patch svc ingress-nginx-controller -n ingress-nginx -p '{"spec": {"type": "LoadBalancer"}}'
 
+
+echo "The external facing IP is just http//localhost/..... "
 echo "Now Run minikube dashboard to see the deployments and dbs, and kill whichever container/pod you desire."
 echo "Please wait 1-2 minutes till everything is deployed"
-echi "Also, when deleting containers, it takes approximately 1 minute for the replica to take over. Be patient, the system recovers :)"
+echo "Also, when deleting containers, it takes approximately 1 minute for the replica to take over. Be patient, the system recovers :)"
+
+minikube tunnel
