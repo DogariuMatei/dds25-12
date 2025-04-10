@@ -23,11 +23,9 @@ PAYMENT_EVENTS = "payment:events"
 
 # Event types
 ORDER_CREATED = "order.created" # we consume
-STOCK_RESERVED = "stock.reserved" # we post
-STOCK_FAILED = "stock.failed" # we post
-STOCK_RELEASED = "stock.released" # we post
 PAYMENT_FAILED = "payment.failed" # we consume
-PAYMENT_SUCCEEDED = "payment.succeeded" # we consume
+STOCK_SUBTRACTED = "stock.subtracted" # we post
+
 
 # Consumer groups
 STOCK_ORDER_GROUP = "stock-order-consumers"
@@ -82,7 +80,7 @@ def ensure_consumer_group(stream, group):
         event_db.xgroup_create(stream, group, mkstream=True)
 
     except redis.exceptions.ResponseError as e:
-        if 'BUSYGROUP' in str(e):  # Group already exists
+        if 'BUSYGROUP' in str(e):
             pass
         else:
             app.logger.error(f"Error creating consumer group: {e}")
@@ -90,8 +88,7 @@ def ensure_consumer_group(stream, group):
 
 
 def two_phase_locking(func):
-    """Decorator that implements 2-Phase Locking for a batch of items."""
-
+    """Decorator that implements 2PL for all items in an order."""
     @wraps(func)
     def wrapper(items, logs_id, *args, **kwargs):
         acquired_locks = {}
@@ -238,9 +235,9 @@ def remove_stock(item_id: str, amount: int):
 
 
 @two_phase_locking
-def make_reservations(items, logs_id):
+def subtract_stock(items, logs_id):
     """
-    Make reservations for multiple items using Redis Pipeline.
+    Subtract stock for multiple items using Redis Pipeline.
     """
     success = True
     failed_items = []
@@ -292,19 +289,19 @@ def make_reservations(items, logs_id):
                 pipe.set(logs_id, "SUBTRACTED")
                 pipe.execute()
 
-            message = "All reservations completed successfully" if success else f"Failed to reserve items: {', '.join(failed_items)}"
+            message = "All stock subtractions completed successfully" if success else f"Failed to subtract items: {', '.join(failed_items)}"
             return success, message
         except redis.exceptions.RedisError as e:
-            app.logger.error(f"Redis pipeline error when making reservations: {e}")
+            app.logger.error(f"Redis pipeline error when making stock subtractions: {e}")
             success = False
-            message = f"Failed to reserve items due to database error"
+            message = f"Failed to subtract items due to database error"
             return success, message
 
 
 @two_phase_locking
-def release_reservations(items, logs_id):
+def rollback_stock(items, logs_id):
     """
-    Release reservations for multiple items using Redis Pipeline.
+    Rollback stock for multiple items using Redis Pipeline.
     """
     item_ids = [item.get('item_id') for item in items if item.get('item_id') and item.get('amount')]
 
@@ -356,7 +353,7 @@ def process_order_events():
                 STOCK_ORDER_GROUP,
                 consumer_name,
                 {ORDER_EVENTS: '>'},
-                count=1,
+                count=10,
                 block=500
             )
 
@@ -380,14 +377,14 @@ def process_order_events():
 
                         logs_id = f"logs{transaction_id}"
                         log_type = db.get(logs_id)
-                        # Try to reserve
-                        success, message = make_reservations(items, logs_id) if not log_type else (True, None)
+
+                        success, message = subtract_stock(items, logs_id) if not log_type else (True, None)
 
                         if not success:
                             add_to_response_stream(response_stream, order_id, "failed", message)
 
                         else:
-                            publish_event(STOCK_EVENTS, STOCK_RESERVED, {
+                            publish_event(STOCK_EVENTS, STOCK_SUBTRACTED, {
                                 "order_id": order_id,
                                 "transaction_id": transaction_id,
                                 "total_cost": total_cost,
@@ -401,7 +398,7 @@ def process_order_events():
 
         except Exception as e:
             app.logger.error(f"Error in order events consumer: {e}")
-            time.sleep(1) #
+            time.sleep(1)
 
 
 def process_payment_events():
@@ -415,7 +412,7 @@ def process_payment_events():
                 STOCK_PAYMENT_GROUP,
                 consumer_name,
                 {PAYMENT_EVENTS: '>'},
-                count=1,
+                count=10,
                 block=500
             )
 
@@ -430,15 +427,13 @@ def process_payment_events():
                     event_data = event.get('data', {})
 
                     if event_type == PAYMENT_FAILED:
-                        order_id = event_data.get('order_id')
                         items = event_data.get('items', [])
-                        response_stream = event_data.get('response_stream')
-
 
                         logs_id = f"logs{event_data.get('transaction_id')}"
                         log_type = db.get(logs_id)
+
                         if log_type == b"SUBTRACTED":
-                            release_reservations(items, logs_id)
+                            rollback_stock(items, logs_id)
 
                     db.xack(stream_name, STOCK_PAYMENT_GROUP, message_id)
 

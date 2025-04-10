@@ -22,8 +22,7 @@ STOCK_EVENTS = "stock:events"
 PAYMENT_EVENTS = "payment:events"
 
 # Event types
-STOCK_RESERVED = "stock.reserved" # we consume
-PAYMENT_SUCCEEDED = "payment.succeeded" # we post
+STOCK_SUBTRACTED = "stock.subtracted" # we consume
 PAYMENT_FAILED = "payment.failed" # we post
 
 # Consumer groups
@@ -96,7 +95,6 @@ def user_locking(func):
     """
     Decorator that implements two phase locking for user payment operations.
     """
-
     @wraps(func)
     def wrapper(user_id, amount, logs_id, *args, **kwargs):
         lock_key = f"lock:user:{user_id}"
@@ -105,7 +103,7 @@ def user_locking(func):
         retry_count = 5
         lock_acquired = False
 
-        # Try to acquire lock with retries
+        # acquire lock with retries
         for attempt in range(retry_count):
             lock_acquired = db.set(lock_key, lock_id, nx=True, ex=lock_timeout)
             if lock_acquired:
@@ -208,7 +206,7 @@ def remove_credit( user_id: str, amount: int):
 
 @user_locking
 def remove_credit_async(user_id, amount, logs_id):
-    """Remove credit from a user with locking handled by decorator"""
+    """Remove credit from a user with locking by decorator"""
     with db.pipeline() as pipe:
         try:
             pipe.watch(user_id)
@@ -218,7 +216,6 @@ def remove_credit_async(user_id, amount, logs_id):
             if user_entry.credit < amount:
                 return False
 
-            # Update credit
             user_entry.credit -= amount
 
             pipe.multi()
@@ -229,7 +226,6 @@ def remove_credit_async(user_id, amount, logs_id):
         except Exception as e:
             app.logger.error(f"Error removing credit for user {user_id}: {e}")
             return False
-
 
 def process_stock_events():
     """Process events from the stock stream"""
@@ -242,7 +238,7 @@ def process_stock_events():
                 PAYMENT_STOCK_GROUP,
                 consumer_name,
                 {STOCK_EVENTS: '>'},
-                count=1,
+                count=10,
                 block=500
             )
 
@@ -255,7 +251,7 @@ def process_stock_events():
                     event_type = event.get('type')
                     event_data = event.get('data', {})
 
-                    if event_type == STOCK_RESERVED:
+                    if event_type == STOCK_SUBTRACTED:
                         transaction_id = event_data.get('transaction_id')
                         order_id = event_data.get('order_id')
                         user_id = event_data.get('user_id')

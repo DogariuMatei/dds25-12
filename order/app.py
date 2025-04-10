@@ -202,9 +202,13 @@ def checkout(order_id: str):
         })
 
     transaction_id = str(uuid.uuid4())
+
+    # this is where checkout polls for a checkout status answer from the other two services
+    # this is a unique, one time use, event stream -> we send the name of it to other services in the ORDER_CREATED EVENT
+    # it is deleted after the first (and only) message is consumed from it
+    # the stream itself is 'created' by whichever other service publishes the checkout termination event (success/failure - 200/400)
     response_stream = f"order:response:{transaction_id}"
 
-    # Event data
     event_data = {
         "order_id": order_id,
         "transaction_id": transaction_id,
@@ -214,20 +218,19 @@ def checkout(order_id: str):
         "response_stream": response_stream
     }
 
-    # Publish the ORDER_CREATED event
+    # publish the ORDER_CREATED event
     event = publish_event(ORDER_EVENTS, ORDER_CREATED, event_data)
 
     if not event:
         return abort(400, "Failed to publish order event")
 
-    timeout = 100
+    timeout = 60
     start_time = time.time()
 
     while time.time() - start_time < timeout:
-        messages = event_db.xread({response_stream: '0'}, count=1, block=100)
-
-        if messages:
-            stream_name, stream_messages = messages[0]
+        message = event_db.xread({response_stream: '0'}, count=1, block=100)
+        if message:
+            stream_name, stream_messages = message[0]
             message_id, message_data = stream_messages[0]
             result = json.loads(message_data[b'result'].decode())
             if result.get('status') == "success":
@@ -242,8 +245,6 @@ def checkout(order_id: str):
     event_db.delete(response_stream)
     app.logger.warning(f"TIMED OUT WAITING FOR RESPONSE")
     return abort(400, "Checkout initiated but processing is still ongoing - Timeout")
-
-
 
 def initialize_streams():
     """Initialize Redis Streams and consumer groups"""
