@@ -17,6 +17,14 @@ services:
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
+      - REDIS_HOST=order-db
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=1
+      - EVENT_REDIS_HOST=event-stream
+      - EVENT_REDIS_PORT=6379
+      - EVENT_REDIS_PASSWORD=redis
+      - EVENT_REDIS_DB=0
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env
@@ -30,6 +38,15 @@ services:
   stock-service:
     build: ./stock
     image: stock:latest
+    environment:
+      - REDIS_HOST=stock-db
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=1
+      - EVENT_REDIS_HOST=event-stream
+      - EVENT_REDIS_PORT=6379
+      - EVENT_REDIS_PASSWORD=redis
+      - EVENT_REDIS_DB=0
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
@@ -43,6 +60,15 @@ services:
   payment-service:
     build: ./payment
     image: user:latest
+    environment:
+      - REDIS_HOST=payment-db
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=1
+      - EVENT_REDIS_HOST=event-stream
+      - EVENT_REDIS_PORT=6379
+      - EVENT_REDIS_PASSWORD=redis
+      - EVENT_REDIS_DB=0
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/payment_redis.env
@@ -52,3 +78,9 @@ services:
   payment-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+
+  event-stream:
+    image: redis:7.2-bookworm
+    command: redis-server --requirepass redis --maxmemory 512mb
+    ports:
+      - "6379:6379"
