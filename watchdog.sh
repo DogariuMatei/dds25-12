@@ -1,6 +1,6 @@
 #!/bin/sh
 
-apk add --no-cache redis docker-compose bash
+apk add --no-cache redis docker-compose
 
 while true; do
   echo "$(date '+%Y-%m-%d %H:%M:%S') Running redis-cli"
