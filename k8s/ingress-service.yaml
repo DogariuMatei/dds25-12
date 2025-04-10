@@ -27,6 +27,6 @@ spec:
           pathType: Prefix
           backend:
             service:
-              name: user-service
+              name: payment-service
               port:
                 number: 5000

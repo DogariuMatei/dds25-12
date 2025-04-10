@@ -16,7 +16,7 @@ kind: Deployment
 metadata:
   name: stock-deployment
 spec:
-  replicas: 1
+  replicas: 4
   selector:
     matchLabels:
       component: stock
@@ -28,23 +28,34 @@ spec:
       containers:
         - name: stock
           image: stock:latest
+          imagePullPolicy: Never
           resources:
             limits:
-              memory: "1Gi"
-              cpu: "1"
+              memory: "100Mi"
+              cpu: "500m"
             requests:
-              memory: "1Gi"
-              cpu: "1"
+              memory: "100Mi"
+              cpu: "500m"
           command: ["gunicorn"]
           args: ["-b", "0.0.0.0:5000", "app:app"]
           ports:
             - containerPort: 5000
           env:
             - name: REDIS_HOST
-              value: redis-master
+              value: db-stock-redis-master
             - name: REDIS_PORT
               value: '6379'
             - name: REDIS_PASSWORD
               value: "redis"
             - name: REDIS_DB
               value: "0"
+            - name: EVENT_REDIS_HOST
+              value: db-event-redis-master
+            - name: EVENT_REDIS_PORT
+              value: '6379'
+            - name: EVENT_REDIS_PASSWORD
+              value: "redis"
+            - name: EVENT_REDIS_DB
+              value: "0"
+            - name: GATEWAY_URL
+              value: "http://ingress-nginx-controller.ingress-nginx"

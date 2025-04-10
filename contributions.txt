@@ -1,0 +1,11 @@
+Contributions:
+
+Zeryab: Full working version using Sentinels and Watchdogs for availability and consistency.
+        Didn't keep it because of scaling issues, but availability was amazing. This was probably the most difficult implementation (find work in  branch: zeri_sentinel_v2)
+
+Tadas: Working Kafka version (didn't keep this one bc kafka is too complex), transitioned to reservation-less stock service (we kept this one),
+       in depth consistency testing (rly good job). (find work in branch: kafka_setup ; main)
+
+Nick: Working 2PC version (we didn't stick with this implementation, too slow) and helped with k8s deployment of final version (find work in branch: nick_branch; main).
+
+Matei: Main Micorservices design (with stock reservation) and k8s deployment. Also, provided good vibes (find work in branch: main).

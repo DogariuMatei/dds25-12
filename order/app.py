@@ -37,10 +37,10 @@ db: redis.Redis = redis.Redis( host=os.environ['REDIS_HOST'],
                                password=os.environ['REDIS_PASSWORD'],
                                db=int(os.environ['REDIS_DB']))
 
-event_db: redis.Redis = redis.Redis( host=os.environ.get('EVENT_REDIS_HOST', 'localhost'),
-                        port=int(os.environ.get('REDIS_PORT', 6379)),
-                        password=os.environ.get('REDIS_PASSWORD', ''),
-                        db=int(os.environ.get('REDIS_DB', 0)))
+event_db: redis.Redis = redis.Redis( host=os.environ['EVENT_REDIS_HOST'],
+                        port=int(os.environ['EVENT_REDIS_PORT']),
+                        password=os.environ['EVENT_REDIS_PASSWORD'],
+                        db=int(os.environ['EVENT_REDIS_DB']))
 
 def close_db_connection():
     db.close()
@@ -160,7 +160,7 @@ def send_get_request(url: str):
     try:
         response = requests.get(url)
     except requests.exceptions.RequestException:
-        abort(400, REQ_ERROR_STR)
+        abort(400, "Failed in sending get request")
     else:
         return response
 
@@ -178,7 +178,7 @@ def add_item(order_id: str, item_id: str, quantity: int):
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+        return abort(400, "DATABASE ERROR")
     return Response(f"Item: {item_id} added to: {order_id} price updated to: {order_entry.total_cost}",
                     status=200)
 
@@ -202,9 +202,13 @@ def checkout(order_id: str):
         })
 
     transaction_id = str(uuid.uuid4())
+
+    # this is where checkout polls for a checkout status answer from the other two services
+    # this is a unique, one time use, event stream -> we send the name of it to other services in the ORDER_CREATED EVENT
+    # it is deleted after the first (and only) message is consumed from it
+    # the stream itself is 'created' by whichever other service publishes the checkout termination event (success/failure - 200/400)
     response_stream = f"order:response:{transaction_id}"
 
-    # Event data
     event_data = {
         "order_id": order_id,
         "transaction_id": transaction_id,
@@ -214,34 +218,33 @@ def checkout(order_id: str):
         "response_stream": response_stream
     }
 
-    # Publish the ORDER_CREATED event
+    # publish the ORDER_CREATED event
     event = publish_event(ORDER_EVENTS, ORDER_CREATED, event_data)
 
     if not event:
         return abort(400, "Failed to publish order event")
 
-    timeout = 100
+    timeout = 60
     start_time = time.time()
 
     while time.time() - start_time < timeout:
-        messages = event_db.xread({response_stream: '0'}, count=1)
-
-        if messages:
-            stream_name, stream_messages = messages[0]
+        message = event_db.xread({response_stream: '0'}, count=1, block=100)
+        if message:
+            stream_name, stream_messages = message[0]
             message_id, message_data = stream_messages[0]
             result = json.loads(message_data[b'result'].decode())
             if result.get('status') == "success":
                 event_db.delete(response_stream)
+                app.logger.info(f"Checkout successful: {result.get('reason')}")
                 return Response(f"Checkout successful: {result.get('reason')}", status=200)
             else:
                 event_db.delete(response_stream)
+                app.logger.info(f"Checkout FAILED: {result.get('reason')}")
                 return abort(400, result.get('reason'))
 
     event_db.delete(response_stream)
     app.logger.warning(f"TIMED OUT WAITING FOR RESPONSE")
     return abort(400, "Checkout initiated but processing is still ongoing - Timeout")
-
-
 
 def initialize_streams():
     """Initialize Redis Streams and consumer groups"""

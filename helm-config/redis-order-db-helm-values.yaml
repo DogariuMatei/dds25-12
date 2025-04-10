@@ -1,0 +1,17 @@
+auth:
+  password: redis
+master:
+  persistence:
+    size: 1Gi
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 100m
+replica:
+  replicaCount: 1
+  persistence:
+    size: 1Gi
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 50m

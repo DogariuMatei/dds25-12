@@ -13,6 +13,8 @@ from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 from functools import wraps
 
+from redis import WatchError
+
 DB_ERROR_STR = "DB error"
 
 # Stream keys
@@ -20,9 +22,7 @@ STOCK_EVENTS = "stock:events"
 PAYMENT_EVENTS = "payment:events"
 
 # Event types
-STOCK_SUBTRACTION_FAILED = "stock.subtraction.failed"  # we consume
-STOCK_RESERVED = "stock.reserved" # we consume
-PAYMENT_SUCCEEDED = "payment.succeeded" # we post
+STOCK_SUBTRACTED = "stock.subtracted" # we consume
 PAYMENT_FAILED = "payment.failed" # we post
 
 # Consumer groups
@@ -35,10 +35,10 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
 
-event_db: redis.Redis = redis.Redis( host=os.environ.get('EVENT_REDIS_HOST', 'localhost'),
-                        port=int(os.environ.get('REDIS_PORT', 6379)),
-                        password=os.environ.get('REDIS_PASSWORD', ''),
-                        db=int(os.environ.get('REDIS_DB', 0)))
+event_db: redis.Redis = redis.Redis( host=os.environ['EVENT_REDIS_HOST'],
+                        port=int(os.environ['EVENT_REDIS_PORT']),
+                        password=os.environ['EVENT_REDIS_PASSWORD'],
+                        db=int(os.environ['EVENT_REDIS_DB']))
 def close_db_connection():
     db.close()
 
@@ -49,21 +49,6 @@ atexit.register(close_db_connection)
 class UserValue(Struct):
     credit: int
 
-
-def publish_event(stream, event_type, data):
-    """Publish an event to a Redis Stream"""
-    event = {
-        "type": event_type,
-        "data": data,
-        "transaction_id": data.get("transaction_id")
-    }
-    try:
-        event_db.xadd(stream, {b'event': json.dumps(event).encode()})
-        return event
-    except Exception as e:
-        app.logger.error(f"Failed to publish event: {e}")
-        return None
-
 def add_to_response_stream(response_stream, order_id, status, reason=None):
     event_db.xadd(response_stream, {
         b'result': json.dumps({
@@ -72,6 +57,15 @@ def add_to_response_stream(response_stream, order_id, status, reason=None):
             "order_id": order_id,
         }).encode()
     })
+
+def publish_event(stream, event_type, data):
+    """Publish an event to a Redis Stream"""
+    event = {
+        "type": event_type,
+        "data": data,
+        "transaction_id": data.get("transaction_id")
+    }
+    event_db.xadd(stream, {b'event': json.dumps(event).encode()})
 
 def ensure_consumer_group(stream, group):
     """Create a consumer group if it doesn't exist"""
@@ -101,16 +95,15 @@ def user_locking(func):
     """
     Decorator that implements two phase locking for user payment operations.
     """
-
     @wraps(func)
-    def wrapper(user_id, amount, *args, **kwargs):
+    def wrapper(user_id, amount, logs_id, *args, **kwargs):
         lock_key = f"lock:user:{user_id}"
         lock_id = str(uuid.uuid4())
         lock_timeout = 5
         retry_count = 5
         lock_acquired = False
 
-        # Try to acquire lock with retries
+        # acquire lock with retries
         for attempt in range(retry_count):
             lock_acquired = db.set(lock_key, lock_id, nx=True, ex=lock_timeout)
             if lock_acquired:
@@ -125,7 +118,7 @@ def user_locking(func):
             return False
 
         try:
-            result = func(user_id, amount, *args, **kwargs)
+            result = func(user_id, amount, logs_id, *args, **kwargs)
             return result
         finally:
             release_lock(lock_key, lock_id)
@@ -134,10 +127,10 @@ def user_locking(func):
 
 
 
-def get_user_from_db(user_id: str) -> UserValue | None:
+def get_user_from_db(user_id: str, pipe) -> UserValue | None:
     try:
         # get serialized data
-        entry: bytes = db.get(user_id)
+        entry: bytes = pipe.get(user_id)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     # deserialize data if it exists else return null
@@ -172,7 +165,7 @@ def batch_init_users(n: int, starting_money: int):
 
 @app.get('/find_user/<user_id>')
 def find_user(user_id: str):
-    user_entry: UserValue = get_user_from_db(user_id)
+    user_entry: UserValue = get_user_from_db(user_id, db)
     return jsonify(
         {
             "user_id": user_id,
@@ -182,7 +175,7 @@ def find_user(user_id: str):
 
 @app.post('/add_funds/<user_id>/<amount>')
 def add_credit(user_id: str, amount: int):
-    user_entry: UserValue = get_user_from_db(user_id)
+    user_entry: UserValue = get_user_from_db(user_id, db)
     # update credit, serialize and update database
     user_entry.credit += int(amount)
     try:
@@ -193,7 +186,7 @@ def add_credit(user_id: str, amount: int):
 
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit( user_id: str, amount: int):
-    user_entry: UserValue = get_user_from_db(user_id)
+    user_entry: UserValue = get_user_from_db(user_id, db)
     amount = int(amount)
 
     if user_entry.credit < amount:
@@ -212,55 +205,27 @@ def remove_credit( user_id: str, amount: int):
 
 
 @user_locking
-def remove_credit_async(user_id, amount):
-    """Remove credit from a user with locking handled by decorator"""
-    try:
-        user_entry = get_user_from_db(user_id)
-        amount = int(amount)
-
-        if user_entry.credit < amount:
-            return False
-
-        # Update credit
-        user_entry.credit -= amount
-
+def remove_credit_async(user_id, amount, logs_id):
+    """Remove credit from a user with locking by decorator"""
+    with db.pipeline() as pipe:
         try:
-            pipe = db.pipeline(transaction=True)
+            pipe.watch(user_id)
+            user_entry = get_user_from_db(user_id, pipe)
+            amount = int(amount)
+
+            if user_entry.credit < amount:
+                return False
+
+            user_entry.credit -= amount
+
+            pipe.multi()
             pipe.set(user_id, msgpack.encode(user_entry))
+            pipe.set(logs_id, "SUBTRACTED")
             pipe.execute()
             return True
-        except redis.exceptions.RedisError as e:
-            app.logger.error(f"DB error when removing credit: {e}")
+        except Exception as e:
+            app.logger.error(f"Error removing credit for user {user_id}: {e}")
             return False
-    except Exception as e:
-        app.logger.error(f"Error removing credit for user {user_id}: {e}")
-        return False
-
-
-@user_locking
-def add_credit_async(user_id, amount):
-    """Add credit to a user with locking handled by decorator"""
-    try:
-        user_entry = get_user_from_db(user_id)
-
-        if isinstance(amount, list):
-            amount = sum(amount)
-        amount = int(amount)
-
-        user_entry.credit += amount
-
-        try:
-            pipe = db.pipeline(transaction=True)
-            pipe.set(user_id, msgpack.encode(user_entry))
-            pipe.execute()
-            return True
-        except redis.exceptions.RedisError as e:
-            app.logger.error(f"DB error when adding credit: {e}")
-            return False
-    except Exception as e:
-        app.logger.error(f"Error adding credit for user {user_id}: {e}")
-        return False
-
 
 def process_stock_events():
     """Process events from the stock stream"""
@@ -273,8 +238,8 @@ def process_stock_events():
                 PAYMENT_STOCK_GROUP,
                 consumer_name,
                 {STOCK_EVENTS: '>'},
-                count=1,
-                block=5000
+                count=10,
+                block=500
             )
 
             if not messages:
@@ -286,69 +251,36 @@ def process_stock_events():
                     event_type = event.get('type')
                     event_data = event.get('data', {})
 
-                    try:
-                        if event_type == STOCK_RESERVED:
-                            transaction_id = event_data.get('transaction_id')
-                            order_id = event_data.get('order_id')
-                            user_id = event_data.get('user_id')
-                            total_cost = event_data.get('total_cost')
-                            items = event_data.get('items', [])
-                            response_stream= event_data.get('response_stream')
+                    if event_type == STOCK_SUBTRACTED:
+                        transaction_id = event_data.get('transaction_id')
+                        order_id = event_data.get('order_id')
+                        user_id = event_data.get('user_id')
+                        total_cost = event_data.get('total_cost')
+                        items = event_data.get('items', [])
+                        response_stream= event_data.get('response_stream')
 
-                            try:
-                                payment_result = remove_credit_async(user_id, int(total_cost))
-                                if not payment_result:
-                                    publish_event(PAYMENT_EVENTS, PAYMENT_FAILED, {
-                                        "order_id": order_id,
-                                        "user_id": user_id,
-                                        "transaction_id": transaction_id,
-                                        "items": items,
-                                        "total_cost": total_cost,
-                                        "response_stream": response_stream
-                                    })
-                                else:
-                                    # Publish payment success event
-                                    publish_event(PAYMENT_EVENTS, PAYMENT_SUCCEEDED, {
-                                        "user_id": user_id,
-                                        "transaction_id": transaction_id,
-                                        "order_id": order_id,
-                                        "items": items,
-                                        "total_cost": total_cost,
-                                        "response_stream": response_stream
-                                    })
+                        logs_id = f"logs{transaction_id}"
+                        log_type = db.get(logs_id)
+                        payment_result = remove_credit_async(user_id, int(total_cost), logs_id) if not log_type else True
+                        if not payment_result:
+                            add_to_response_stream(response_stream, order_id, "failed")
+                            publish_event(PAYMENT_EVENTS, PAYMENT_FAILED, {
+                                "order_id": order_id,
+                                "user_id": user_id,
+                                "transaction_id": transaction_id,
+                                "items": items,
+                                "total_cost": total_cost,
+                                "response_stream": response_stream
+                            })
+                        else:
+                            add_to_response_stream(response_stream, order_id, "success", "OK")
 
-                            except Exception as e:
-                                reason = f"Error processing payment: {e}"
-                                add_to_response_stream(response_stream, order_id, "failed", reason)
-
-
-                        elif event_type == STOCK_SUBTRACTION_FAILED:
-                            order_id = event_data.get('order_id')
-                            user_id = event_data.get('user_id')
-                            total_cost = event_data.get('total_cost')
-                            response_stream = event_data.get('response_stream')
-
-                            try:
-                                rollback_result = add_credit_async(user_id, sum(total_cost))
-                                if rollback_result:
-                                    reason = "Payment rollback success!"
-                                else:
-                                    reason = "Payment rollback failed!"
-                                add_to_response_stream(response_stream, order_id, "failed", reason)
-
-                            except Exception as e:
-                                reason = f"Error rolling back payment: {e}"
-                                app.logger.error(reason)
-                                add_to_response_stream(response_stream, order_id, "failed", reason)
-
-                        # Acknowledge the message
-                        db.xack(stream_name, PAYMENT_STOCK_GROUP, message_id)
-                    except Exception as e:
-                        app.logger.error(f"Error processing stock event {event_type}: {e}")
+                    # Acknowledge the message
+                    db.xack(stream_name, PAYMENT_STOCK_GROUP, message_id)
 
         except Exception as e:
             app.logger.error(f"Error in stock events consumer: {e}")
-            time.sleep(0.1)
+            time.sleep(0.1) #
 
 
 def start_consumers():
