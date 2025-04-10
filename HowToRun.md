@@ -1,7 +1,7 @@
 # How to run:
-----------
+
 ## You need `minikube` and `kubectl` installed locally
----------
+
 We wrote a bash script that runs everything by itself `RUN-ME-IF-LINUX.sh` or `RUN-ME-IF-WINDOWS-WSL.sh`. We hope you're using some sort of Linux bc you will have less of a headache.
 Make sure to run it, wait, and PAY ATTENTION TO THE LAST LINE IN THE OUTPUT. You have to paste the right IP into the WDM benchmark `urls.json` file.  
 
