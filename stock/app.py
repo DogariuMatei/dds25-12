@@ -427,7 +427,10 @@ def process_payment_events():
                     event_data = event.get('data', {})
 
                     if event_type == PAYMENT_FAILED:
+                        order_id = event_data.get('order_id')
                         items = event_data.get('items', [])
+                        response_stream = event_data.get('response_stream')
+
 
                         logs_id = f"logs{event_data.get('transaction_id')}"
                         log_type = db.get(logs_id)
@@ -435,6 +438,7 @@ def process_payment_events():
                         if log_type == b"SUBTRACTED":
                             rollback_stock(items, logs_id)
 
+                        add_to_response_stream(response_stream, order_id, "failed")
                     db.xack(stream_name, STOCK_PAYMENT_GROUP, message_id)
 
         except Exception as e:

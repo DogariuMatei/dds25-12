@@ -263,7 +263,6 @@ def process_stock_events():
                         log_type = db.get(logs_id)
                         payment_result = remove_credit_async(user_id, int(total_cost), logs_id) if not log_type else True
                         if not payment_result:
-                            add_to_response_stream(response_stream, order_id, "failed")
                             publish_event(PAYMENT_EVENTS, PAYMENT_FAILED, {
                                 "order_id": order_id,
                                 "user_id": user_id,
