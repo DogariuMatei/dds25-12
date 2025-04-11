@@ -32,6 +32,8 @@ The payment stock consumes each event and proceeds to directly subtract (or fail
 
 ### Project Deployment:
 
+We use Kubernetes to manage the deployment, scaling, and resilience of each microservice involved in the workflow. Kubernetes ensures high availability of services, automatic restarts in case of failures, and consistent configuration management, all of which are important in our setup where services interact via events.
+
 Please read the `HowToRun.md` file to figure out the proper deployment for this project.
 
 ### Contributions:
