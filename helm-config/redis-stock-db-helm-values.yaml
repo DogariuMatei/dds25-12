@@ -2,16 +2,16 @@ auth:
   password: redis
 master:
   persistence:
-    size: 1Gi
+    size: 0.5Gi
   resources:
     requests:
-      memory: 1Gi
+      memory: 0.5Gi
       cpu: 1000m
 replica:
   replicaCount: 1
   persistence:
-    size: 1Gi
+    size: 0.5Gi
   resources:
     requests:
-      memory: 1Gi
+      memory: 0.5Gi
       cpu: 300m
